@@ -1,0 +1,17 @@
+p,n,metric,metric_mean,metric_std,runs
+0.65,2,A_blocks_canonical_over_pn2016,0.9743589743589743,0.0,1
+0.65,3,A_blocks_canonical_over_pn2016,0.7179487179487178,0.0,1
+0.65,5,A_blocks_canonical_over_pn2016,1.035897435897436,0.0,1
+0.65,10,A_blocks_canonical_over_pn2016,0.9282051282051282,0.0,1
+0.7,2,A_blocks_canonical_over_pn2016,0.8333333333333334,0.0,1
+0.7,3,A_blocks_canonical_over_pn2016,0.9365079365079367,0.0,1
+0.7,5,A_blocks_canonical_over_pn2016,1.0285714285714285,0.0,1
+0.7,10,A_blocks_canonical_over_pn2016,1.0142857142857142,0.0,1
+0.75,2,A_blocks_canonical_over_pn2016,1.0888888888888888,0.0,1
+0.75,3,A_blocks_canonical_over_pn2016,0.8740740740740741,0.0,1
+0.75,5,A_blocks_canonical_over_pn2016,0.9777777777777777,0.0,1
+0.75,10,A_blocks_canonical_over_pn2016,0.9866666666666667,0.0,1
+0.8,2,A_blocks_canonical_over_pn2016,0.9583333333333334,0.0,1
+0.8,3,A_blocks_canonical_over_pn2016,1.083333333333333,0.0,1
+0.8,5,A_blocks_canonical_over_pn2016,1.0833333333333333,0.0,1
+0.8,10,A_blocks_canonical_over_pn2016,1.0041666666666667,0.0,1

@@ -1,0 +1,10 @@
+scenario,p,n,run_id,seed,T,t_end,canonical_len,A_blocks_canonical,H_blocks_canonical,A_share,A_orphan_published,H_orphan_published,attacks_started,attacks_success_2blocks,attacks_success_race,attacks_abort,attacks_release_only,final_difficulty,num_epochs_completed
+scenario2_no_daa_by_time,0.55,,0,2233284213750991911,10.0,300.0,20,12,8,0.6,0,0,12,0,0,0,12,1.0,0
+scenario2_no_daa_by_time,0.6,,0,1672903907025585553,10.0,300.0,31,14,17,0.45161290322580644,1,0,12,3,0,0,9,1.0,0
+scenario2_no_daa_by_time,0.65,,0,6660602718518011983,10.0,300.0,41,23,18,0.5609756097560976,2,0,17,8,0,0,9,1.0,0
+scenario2_no_daa_by_time,0.7,,0,2185321686078401477,10.0,300.0,25,18,7,0.72,0,1,14,3,1,0,11,1.0,0
+scenario2_no_daa_by_time,0.75,,0,2962795357725961609,10.0,300.0,31,25,6,0.8064516129032258,0,1,15,9,1,0,6,1.0,0
+scenario2_no_daa_by_time,0.8,,0,3394530583321125066,10.0,300.0,36,32,4,0.8888888888888888,0,2,19,12,1,0,7,1.0,0
+scenario2_no_daa_by_time,0.85,,0,1518372811438506930,10.0,300.0,30,26,4,0.8666666666666667,0,1,16,10,1,0,5,1.0,0
+scenario2_no_daa_by_time,0.9,,0,2743944140234017166,10.0,300.0,37,35,2,0.9459459459459459,0,0,20,16,0,0,3,1.0,0
+scenario2_no_daa_by_time,0.95,,0,1561935083135962543,10.0,300.0,28,28,0,1.0,0,0,15,13,0,0,2,1.0,0
