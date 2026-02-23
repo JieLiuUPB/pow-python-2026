@@ -4,10 +4,11 @@ import argparse
 import csv
 import hashlib
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -799,27 +800,116 @@ def scenario3(
     return raw_results, epoch_rows, summary_rows
 
 
+def apply_plot_theme(plt_mod: Any) -> None:
+    try:
+        plt_mod.style.use("seaborn-v0_8-whitegrid")
+    except Exception:
+        pass
+    plt_mod.rcParams.update(
+        {
+            "figure.facecolor": "#f4f7fb",
+            "axes.facecolor": "#fcfdff",
+            "axes.edgecolor": "#d7deea",
+            "axes.grid": True,
+            "grid.alpha": 0.25,
+            "grid.linestyle": "--",
+            "axes.titleweight": "bold",
+            "axes.labelweight": "semibold",
+            "font.size": 11,
+            "axes.titlesize": 13,
+            "axes.labelsize": 11,
+            "legend.frameon": True,
+            "legend.facecolor": "#ffffff",
+            "legend.edgecolor": "#d8dce6",
+        }
+    )
+
+
+def save_figure_bundle(fig_dir: Path, stem: str, fig: Any) -> None:
+    ensure_dir(fig_dir)
+    png_path = fig_dir / f"{stem}.png"
+    pdf_path = fig_dir / f"{stem}.pdf"
+    fig.savefig(png_path, dpi=240, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
+
+
+def save_plot_data(fig_dir: Path, stem: str, rows: Sequence[Dict[str, Any]]) -> None:
+    row_list = list(rows)
+    if not row_list:
+        return
+    write_csv(
+        fig_dir / f"{stem}_plot_data.csv",
+        row_list,
+        list(row_list[0].keys()),
+    )
+
+
 def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     plt_mod = get_plt()
     if plt_mod is None:
         return
     ensure_dir(fig_dir)
+    apply_plot_theme(plt_mod)
 
-    p_vals = [row["p"] for row in summary_rows]
-    means = [row["metric_mean"] for row in summary_rows]
-    stds = [row["metric_std"] for row in summary_rows]
+    rows = sorted(summary_rows, key=lambda r: r["p"])
+    p_vals = np.array([row["p"] for row in rows], dtype=float)
+    means = np.array([row["metric_mean"] for row in rows], dtype=float)
+    stds = np.array([row["metric_std"] for row in rows], dtype=float)
 
-    plt_mod.figure(figsize=(8, 5))
-    plt_mod.errorbar(p_vals, means, yerr=stds, fmt="o-", capsize=3, label="TBW simulated")
-    plt_mod.plot(p_vals, p_vals, "--", label="baseline y=x")
-    plt_mod.xlabel("p")
-    plt_mod.ylabel("A_share")
-    plt_mod.title("Scenario 1: Relative Share (No DAA, stop at 2016 canonical blocks)")
-    plt_mod.legend()
-    plt_mod.grid(alpha=0.3)
-    plt_mod.tight_layout()
-    plt_mod.savefig(fig_dir / "s1_relative_share.png", dpi=160)
-    plt_mod.close()
+    fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
+    ax.errorbar(
+        p_vals,
+        means,
+        yerr=stds,
+        fmt="o-",
+        color="#155eef",
+        ecolor="#8eb4ff",
+        linewidth=2.2,
+        elinewidth=1.5,
+        capsize=4,
+        markerfacecolor="#ffffff",
+        markeredgewidth=1.6,
+        label="TBW simulation",
+        zorder=3,
+    )
+    ax.fill_between(
+        p_vals,
+        means - stds,
+        means + stds,
+        color="#155eef",
+        alpha=0.10,
+        zorder=2,
+    )
+    ax.plot(
+        p_vals,
+        p_vals,
+        linestyle="--",
+        color="#2f3a4f",
+        linewidth=1.8,
+        label="baseline y=x",
+        zorder=1,
+    )
+    ax.set_xlabel("Attacker hashrate p")
+    ax.set_ylabel("mean(A_share)")
+    ax.set_title("Scenario 1: Relative Share (No DAA, canonical length = 2016)")
+    ax.legend(loc="upper left")
+    ax.margins(x=0.02)
+    ax.set_ylim(bottom=max(0.0, float(np.min(means - stds)) - 0.02))
+
+    fig.tight_layout()
+    save_figure_bundle(fig_dir, "s1_relative_share", fig)
+    plt_mod.close(fig)
+
+    data_rows = [
+        {
+            "p": float(p_vals[i]),
+            "metric_mean": float(means[i]),
+            "metric_std": float(stds[i]),
+            "baseline_y_equals_x": float(p_vals[i]),
+        }
+        for i in range(len(p_vals))
+    ]
+    save_plot_data(fig_dir, "s1_relative_share", data_rows)
 
 
 def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
@@ -827,21 +917,58 @@ def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     if plt_mod is None:
         return
     ensure_dir(fig_dir)
+    apply_plot_theme(plt_mod)
 
-    p_vals = [row["p"] for row in summary_rows]
-    means = [row["metric_mean"] for row in summary_rows]
-    stds = [row["metric_std"] for row in summary_rows]
+    rows = sorted(summary_rows, key=lambda r: r["p"])
+    p_vals = np.array([row["p"] for row in rows], dtype=float)
+    means = np.array([row["metric_mean"] for row in rows], dtype=float)
+    stds = np.array([row["metric_std"] for row in rows], dtype=float)
 
-    plt_mod.figure(figsize=(8, 5))
-    plt_mod.errorbar(p_vals, means, yerr=stds, fmt="o-", capsize=3)
-    plt_mod.axhline(0.0, linestyle="--")
-    plt_mod.xlabel("p")
-    plt_mod.ylabel("A_blocks_canonical - p*2016")
-    plt_mod.title("Scenario 2: Absolute Gain Delta (No DAA, stop at 2016T)")
-    plt_mod.grid(alpha=0.3)
-    plt_mod.tight_layout()
-    plt_mod.savefig(fig_dir / "s2_absolute_delta.png", dpi=160)
-    plt_mod.close()
+    fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
+    ax.errorbar(
+        p_vals,
+        means,
+        yerr=stds,
+        fmt="o-",
+        color="#0f766e",
+        ecolor="#7bd4ce",
+        linewidth=2.2,
+        elinewidth=1.5,
+        capsize=4,
+        markerfacecolor="#ffffff",
+        markeredgewidth=1.6,
+    )
+    ax.fill_between(
+        p_vals,
+        means,
+        0.0,
+        where=means <= 0.0,
+        color="#f97316",
+        alpha=0.12,
+        interpolate=True,
+        label="delta <= 0 region",
+    )
+    ax.axhline(0.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 0")
+    ax.set_xlabel("Attacker hashrate p")
+    ax.set_ylabel("mean(A_blocks_canonical - p*2016)")
+    ax.set_title("Scenario 2: Absolute Gain Delta (No DAA, fixed time = 2016T)")
+    ax.legend(loc="lower left")
+    ax.margins(x=0.02)
+
+    fig.tight_layout()
+    save_figure_bundle(fig_dir, "s2_absolute_delta", fig)
+    plt_mod.close(fig)
+
+    data_rows = [
+        {
+            "p": float(p_vals[i]),
+            "metric_mean": float(means[i]),
+            "metric_std": float(stds[i]),
+            "baseline_delta": 0.0,
+        }
+        for i in range(len(p_vals))
+    ]
+    save_plot_data(fig_dir, "s2_absolute_delta", data_rows)
 
 
 def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
@@ -849,25 +976,119 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     if plt_mod is None:
         return
     ensure_dir(fig_dir)
+    apply_plot_theme(plt_mod)
 
-    plt_mod.figure(figsize=(8, 5))
-    p_values = sorted({row["p"] for row in summary_rows})
-    for p in p_values:
-        rows = sorted([r for r in summary_rows if abs(r["p"] - p) < 1e-12], key=lambda x: x["n"])
-        x = [r["n"] for r in rows]
-        y = [r["metric_mean"] for r in rows]
-        yerr = [r["metric_std"] for r in rows]
-        plt_mod.errorbar(x, y, yerr=yerr, marker="o", capsize=3, label=f"p={p}")
+    fig, ax = plt_mod.subplots(figsize=(9.2, 5.4))
+    p_values = sorted({float(row["p"]) for row in summary_rows})
+    palette = ["#155eef", "#0f766e", "#b42318", "#7a5af8", "#dd6b20"]
+    plot_data_rows: List[Dict[str, Any]] = []
 
-    plt_mod.axhline(1.0, linestyle="--")
-    plt_mod.xlabel("n (time horizon multiplier)")
-    plt_mod.ylabel("A_blocks_canonical / (p*n*2016)")
-    plt_mod.title("Scenario 3: Long-Term Ratio with DAA")
-    plt_mod.grid(alpha=0.3)
-    plt_mod.legend()
-    plt_mod.tight_layout()
-    plt_mod.savefig(fig_dir / "s3_longterm_ratio.png", dpi=160)
-    plt_mod.close()
+    for idx, p in enumerate(p_values):
+        rows = sorted(
+            [r for r in summary_rows if abs(float(r["p"]) - p) < 1e-12],
+            key=lambda x: int(x["n"]),
+        )
+        x = np.array([int(r["n"]) for r in rows], dtype=int)
+        y = np.array([float(r["metric_mean"]) for r in rows], dtype=float)
+        yerr = np.array([float(r["metric_std"]) for r in rows], dtype=float)
+        color = palette[idx % len(palette)]
+        ax.errorbar(
+            x,
+            y,
+            yerr=yerr,
+            marker="o",
+            capsize=4,
+            linewidth=2.0,
+            elinewidth=1.4,
+            color=color,
+            markerfacecolor="#ffffff",
+            markeredgewidth=1.4,
+            label=f"p={p:.2f}",
+        )
+        ax.fill_between(x, y - yerr, y + yerr, color=color, alpha=0.08)
+        for i in range(len(x)):
+            plot_data_rows.append(
+                {
+                    "p": p,
+                    "n": int(x[i]),
+                    "metric_mean": float(y[i]),
+                    "metric_std": float(yerr[i]),
+                    "baseline_ratio": 1.0,
+                }
+            )
+
+    ax.axhline(1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1")
+    ax.set_xlabel("Time horizon multiplier n")
+    ax.set_ylabel("mean( A_blocks_canonical / (p*n*2016) )")
+    ax.set_title("Scenario 3: Long-Term Ratio with DAA")
+    ax.legend(loc="best", ncols=2)
+    ax.margins(x=0.03)
+
+    fig.tight_layout()
+    save_figure_bundle(fig_dir, "s3_longterm_ratio", fig)
+    plt_mod.close(fig)
+    save_plot_data(fig_dir, "s3_longterm_ratio", plot_data_rows)
+
+
+def plot_scenario3_difficulty(epoch_rows: List[EpochStat], fig_dir: Path) -> None:
+    plt_mod = get_plt()
+    if plt_mod is None or not epoch_rows:
+        return
+    ensure_dir(fig_dir)
+    apply_plot_theme(plt_mod)
+
+    max_n = max(e.n for e in epoch_rows)
+    filtered = [e for e in epoch_rows if e.n == max_n]
+    grouped: Dict[Tuple[float, int], List[float]] = defaultdict(list)
+    for row in filtered:
+        grouped[(row.p, row.epoch_index)].append(row.difficulty_new)
+
+    series_by_p: Dict[float, List[Tuple[int, float, float]]] = defaultdict(list)
+    for (p, epoch_index), values in grouped.items():
+        m, s = aggregate_metric(values)
+        series_by_p[p].append((epoch_index, m, s))
+
+    palette = ["#0f766e", "#155eef", "#b42318", "#7a5af8", "#dd6b20"]
+    fig, ax = plt_mod.subplots(figsize=(9.2, 5.4))
+    plot_rows: List[Dict[str, Any]] = []
+
+    for idx, p in enumerate(sorted(series_by_p.keys())):
+        seq = sorted(series_by_p[p], key=lambda x: x[0])
+        x = np.array([item[0] for item in seq], dtype=int)
+        y = np.array([item[1] for item in seq], dtype=float)
+        yerr = np.array([item[2] for item in seq], dtype=float)
+        color = palette[idx % len(palette)]
+        ax.errorbar(
+            x,
+            y,
+            yerr=yerr,
+            marker="o",
+            capsize=4,
+            linewidth=1.9,
+            color=color,
+            label=f"p={p:.2f}, n={max_n}",
+        )
+        for i in range(len(x)):
+            plot_rows.append(
+                {
+                    "p": p,
+                    "n": max_n,
+                    "epoch_index": int(x[i]),
+                    "difficulty_mean": float(y[i]),
+                    "difficulty_std": float(yerr[i]),
+                }
+            )
+
+    ax.set_xlabel("Epoch index")
+    ax.set_ylabel("Difficulty D")
+    ax.set_title("Scenario 3 (Supplement): DAA Difficulty Trajectory")
+    ax.legend(loc="best", ncols=2)
+    ax.margins(x=0.02)
+
+    fig.tight_layout()
+    save_figure_bundle(fig_dir, "s3_difficulty_epoch", fig)
+    plt_mod.close(fig)
+    save_plot_data(fig_dir, "s3_difficulty_epoch", plot_rows)
 
 
 def write_config_summary(
@@ -947,6 +1168,7 @@ def main() -> None:
     s1_summary: List[Dict[str, Any]] = []
     s2_summary: List[Dict[str, Any]] = []
     s3_summary: List[Dict[str, Any]] = []
+    s3_epoch_rows: List[EpochStat] = []
 
     if "1" in scenarios:
         _, s1_summary = scenario1(
@@ -970,7 +1192,7 @@ def main() -> None:
         print("Scenario 2 completed")
 
     if "3" in scenarios:
-        _, _, s3_summary = scenario3(
+        _, s3_epoch_rows, s3_summary = scenario3(
             T=args.T,
             runs=args.runs,
             epoch_len=args.epoch_len,
@@ -989,6 +1211,7 @@ def main() -> None:
                 plot_scenario2(s2_summary, figures_dir)
             if s3_summary:
                 plot_scenario3(s3_summary, figures_dir)
+                plot_scenario3_difficulty(s3_epoch_rows, figures_dir)
             print("Figures saved")
 
 
