@@ -7,28 +7,10 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean, stdev
+from statistics import mean
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-
-plt = None
-_PLOT_IMPORT_TRIED = False
-
-
-def get_plt():  # pragma: no cover - plotting is optional at runtime
-    global plt, _PLOT_IMPORT_TRIED
-    if _PLOT_IMPORT_TRIED:
-        return plt
-    _PLOT_IMPORT_TRIED = True
-    try:
-        import matplotlib.pyplot as _plt
-    except Exception:
-        plt = None
-    else:
-        plt = _plt
-    return plt
-
 
 EPS = 1e-12
 
@@ -41,7 +23,6 @@ class SimConfig:
     runs: int = 10
     base_seed: int = 20260223
     results_dir: Path = Path("results_section5")
-    figures_dir: Path = Path("figures_section5")
 
 
 @dataclass
@@ -864,14 +845,6 @@ def write_csv(
         writer.writerows(rows)
 
 
-def aggregate(values: Sequence[float]) -> Tuple[float, float]:
-    if not values:
-        return 0.0, 0.0
-    if len(values) == 1:
-        return float(values[0]), 0.0
-    return mean(values), stdev(values)
-
-
 def build_scenarios(
     three_hashrates: Dict[str, float],
     four_hashrates: Dict[str, float],
@@ -960,40 +933,10 @@ def summarize_runs(raw_results: Sequence[RunResult]) -> List[Dict[str, Any]]:
             grouped.setdefault(key, []).append(result)
 
     summary_rows: List[Dict[str, Any]] = []
-    for (experiment_id, scenario_id, pool_id), runs in sorted(grouped.items()):
-        counts = [r.blocks_canonical_by_pool[pool_id] for r in runs]
+    for (_, _, pool_id), runs in sorted(grouped.items()):
         shares = [r.share_by_pool[pool_id] for r in runs]
-        orphans = [r.orphans_by_pool[pool_id] for r in runs]
-
-        count_mean, count_std = aggregate(counts)
-        share_mean, share_std = aggregate(shares)
-        orphan_mean, orphan_std = aggregate(orphans)
-
-        baseline = runs[0].hashrates[pool_id] * runs[0].target_blocks
-        delta = [c - baseline for c in counts]
-        delta_mean, delta_std = aggregate(delta)
-        ratio = [c / baseline if baseline > EPS else 0.0 for c in counts]
-        ratio_mean, ratio_std = aggregate(ratio)
-
-        summary_rows.append(
-            {
-                "experiment_id": experiment_id,
-                "scenario_id": scenario_id,
-                "pool_id": pool_id,
-                "runs": len(runs),
-                "baseline_blocks": baseline,
-                "count_mean": count_mean,
-                "count_std": count_std,
-                "share_mean": share_mean,
-                "share_std": share_std,
-                "orphan_mean": orphan_mean,
-                "orphan_std": orphan_std,
-                "delta_mean": delta_mean,
-                "delta_std": delta_std,
-                "ratio_mean": ratio_mean,
-                "ratio_std": ratio_std,
-            }
-        )
+        share_mean = mean(shares) if shares else 0.0
+        summary_rows.append({"share_mean": share_mean})
 
     return summary_rows
 
@@ -1050,115 +993,6 @@ def write_event_log(path: Path, event_log: Sequence[Dict[str, Any]]) -> None:
         return
     fields = sorted({field for row in rows for field in row.keys()})
     write_csv(path, rows, fields)
-
-
-def _get_summary_stat(
-    summary_rows: Sequence[Dict[str, Any]],
-    scenario_id: str,
-    pool_id: str,
-    metric: str,
-) -> Tuple[float, float]:
-    for row in summary_rows:
-        if row["scenario_id"] == scenario_id and row["pool_id"] == pool_id:
-            return float(row[f"{metric}_mean"]), float(row[f"{metric}_std"])
-    return 0.0, 0.0
-
-
-def plot_pool_scenarios(
-    *,
-    pool_id: str,
-    labels: Sequence[str],
-    means: Sequence[float],
-    stds: Sequence[float],
-    out_path: Path,
-    title: str,
-    y_label: str,
-) -> None:
-    plt_mod = get_plt()
-    if plt_mod is None:
-        return
-
-    ensure_dir(out_path.parent)
-
-    x = np.arange(len(labels))
-    plt_mod.figure(figsize=(8, 5))
-    plt_mod.errorbar(x, means, yerr=stds, fmt="o-", capsize=4)
-    plt_mod.xticks(x, labels)
-    plt_mod.title(title)
-    plt_mod.ylabel(y_label)
-    plt_mod.xlabel(f"Pool {pool_id} scenarios")
-    plt_mod.grid(alpha=0.3)
-    plt_mod.tight_layout()
-    plt_mod.savefig(out_path, dpi=180)
-    plt_mod.close()
-
-
-def plot_section5_figures(
-    *,
-    config: SimConfig,
-    summary_rows: Sequence[Dict[str, Any]],
-    three_hashrates: Dict[str, float],
-    four_hashrates: Dict[str, float],
-    traitor_id: str,
-    metric: str = "delta",
-) -> None:
-    if get_plt() is None:
-        return
-
-    if metric not in {"delta", "count"}:
-        raise ValueError("metric must be one of: delta, count")
-
-    def baseline(pool: str, rates: Dict[str, float]) -> float:
-        if metric == "count":
-            return rates[pool] * config.target_blocks
-        return 0.0
-
-    y_label = "Canonical blocks" if metric == "count" else "Delta blocks vs baseline"
-
-    # Three-pool figures
-    for pool_id, scenario_ids in {
-        "b": ["1.1", "1.2.1", "1.3"],
-        "s": ["1.1", "1.2.2", "1.3"],
-    }.items():
-        labels = ["Baseline"] + scenario_ids
-        means = [baseline(pool_id, three_hashrates)]
-        stds = [0.0]
-        for scenario_id in scenario_ids:
-            m, s = _get_summary_stat(summary_rows, scenario_id, pool_id, metric)
-            means.append(m)
-            stds.append(s)
-
-        plot_pool_scenarios(
-            pool_id=pool_id,
-            labels=labels,
-            means=means,
-            stds=stds,
-            out_path=config.figures_dir
-            / f"three_pools_{pool_id}_gamma{config.gamma:.2f}.png",
-            title=f"Three pools: pool {pool_id}",
-            y_label=y_label,
-        )
-
-    # Four-pool figures
-    for pool_id in ["1", "2", "3"]:
-        labels = ["Baseline", "2.1", "2.2", "2.3"]
-        means = [baseline(pool_id, four_hashrates)]
-        stds = [0.0]
-        for scenario_id in ["2.1", "2.2", "2.3"]:
-            m, s = _get_summary_stat(summary_rows, scenario_id, pool_id, metric)
-            means.append(m)
-            stds.append(s)
-
-        plot_pool_scenarios(
-            pool_id=pool_id,
-            labels=labels,
-            means=means,
-            stds=stds,
-            out_path=config.figures_dir
-            / f"four_pools_{pool_id}_traitor{traitor_id}_gamma{config.gamma:.2f}.png",
-            title=f"Four pools: pool {pool_id} (traitor={traitor_id})",
-            y_label=y_label,
-        )
 
 
 def run_all_experiments(
@@ -1244,9 +1078,6 @@ def main() -> None:
         help="comma-separated, e.g. 1=0.27,2=0.27,3=0.27,h=0.19",
     )
     parser.add_argument("--results-dir", default="results_section5")
-    parser.add_argument("--figures-dir", default="figures_section5")
-    parser.add_argument("--skip-plots", action="store_true")
-    parser.add_argument("--plot-metric", choices=["delta", "count"], default="delta")
     parser.add_argument("--save-sample-event-logs", action="store_true")
 
     args = parser.parse_args()
@@ -1258,7 +1089,6 @@ def main() -> None:
         runs=args.runs,
         base_seed=args.base_seed,
         results_dir=Path(args.results_dir),
-        figures_dir=Path(args.figures_dir),
     )
     betray_config = BetrayConfig(
         q=args.q,
@@ -1271,7 +1101,7 @@ def main() -> None:
     three_hashrates = parse_hashrates(args.three_hashrates, ["b", "s", "h"])
     four_hashrates = parse_hashrates(args.four_hashrates, ["1", "2", "3", "h"])
 
-    raw_results, summary_rows = run_all_experiments(
+    raw_results, _ = run_all_experiments(
         config=config,
         betray_config=betray_config,
         three_hashrates=three_hashrates,
@@ -1279,19 +1109,6 @@ def main() -> None:
         traitor_id=args.traitor_id,
         save_sample_event_logs=args.save_sample_event_logs,
     )
-
-    if not args.skip_plots:
-        if get_plt() is None:
-            print("matplotlib unavailable, skipped plotting")
-        else:
-            plot_section5_figures(
-                config=config,
-                summary_rows=summary_rows,
-                three_hashrates=three_hashrates,
-                four_hashrates=four_hashrates,
-                traitor_id=args.traitor_id,
-                metric=args.plot_metric,
-            )
 
     print("Section 5 simulation completed")
     print(f"  runs_per_scenario = {config.runs}")
