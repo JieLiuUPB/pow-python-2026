@@ -7,7 +7,6 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -23,6 +22,7 @@ class SimConfig:
     runs: int = 10
     base_seed: int = 20260223
     results_dir: Path = Path("results_section5")
+    figures_dir: Path = Path("figures_section5")
 
 
 @dataclass
@@ -933,12 +933,217 @@ def summarize_runs(raw_results: Sequence[RunResult]) -> List[Dict[str, Any]]:
             grouped.setdefault(key, []).append(result)
 
     summary_rows: List[Dict[str, Any]] = []
-    for (_, _, pool_id), runs in sorted(grouped.items()):
-        shares = [r.share_by_pool[pool_id] for r in runs]
-        share_mean = mean(shares) if shares else 0.0
-        summary_rows.append({"share_mean": share_mean})
+    for (experiment_id, scenario_id, pool_id), runs in sorted(grouped.items()):
+        first = runs[0]
+        hashrate = float(first.hashrates[pool_id])
+        target_blocks = int(first.target_blocks)
+        baseline_blocks = hashrate * target_blocks
+
+        blocks = [float(r.blocks_canonical_by_pool[pool_id]) for r in runs]
+        shares = [float(r.share_by_pool[pool_id]) for r in runs]
+        betray_counts = [float(r.betray_count) for r in runs]
+        end_heights = [
+            float(r.cartel_end_height) for r in runs if r.cartel_end_height is not None
+        ]
+
+        blocks_mean = float(np.mean(blocks)) if blocks else 0.0
+        blocks_std = float(np.std(blocks, ddof=1)) if len(blocks) > 1 else 0.0
+        share_mean = float(np.mean(shares)) if shares else 0.0
+        share_std = float(np.std(shares, ddof=1)) if len(shares) > 1 else 0.0
+        betray_count_mean = float(np.mean(betray_counts)) if betray_counts else 0.0
+        betray_count_std = (
+            float(np.std(betray_counts, ddof=1)) if len(betray_counts) > 1 else 0.0
+        )
+        delta_mean = blocks_mean - baseline_blocks
+        ratio_mean = blocks_mean / baseline_blocks if baseline_blocks > EPS else 0.0
+
+        summary_rows.append(
+            {
+                "experiment_id": experiment_id,
+                "scenario_id": scenario_id,
+                "pool_id": pool_id,
+                "runs": len(runs),
+                "T": first.T,
+                "gamma": first.gamma,
+                "target_blocks": target_blocks,
+                "hashrate": hashrate,
+                "hashrates": json.dumps(first.hashrates, sort_keys=True),
+                "baseline_blocks": baseline_blocks,
+                "blocks_mean": blocks_mean,
+                "blocks_std": blocks_std,
+                "share_mean": share_mean,
+                "share_std": share_std,
+                "delta_mean": delta_mean,
+                "ratio_mean": ratio_mean,
+                "betray_count_mean": betray_count_mean,
+                "betray_count_std": betray_count_std,
+                "cartel_end_height_mean": (
+                    float(np.mean(end_heights)) if end_heights else ""
+                ),
+                "cartel_end_height_rate": len(end_heights) / len(runs),
+                "num_attacks_started_mean": float(
+                    np.mean([r.num_attacks_started for r in runs])
+                ),
+                "num_attacks_success_2blocks_mean": float(
+                    np.mean([r.num_attacks_success_2blocks for r in runs])
+                ),
+                "num_attacks_abort_mean": float(
+                    np.mean([r.num_attacks_abort for r in runs])
+                ),
+                "num_attacks_release_only_mean": float(
+                    np.mean([r.num_attacks_release_only for r in runs])
+                ),
+                "num_attacks_race_win_mean": float(
+                    np.mean([r.num_attacks_race_win for r in runs])
+                ),
+                "num_attacks_race_lose_mean": float(
+                    np.mean([r.num_attacks_race_lose for r in runs])
+                ),
+            }
+        )
 
     return summary_rows
+
+
+def _float_token(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".").replace(".", "p")
+
+
+def _hashrates_token(hashrates: Dict[str, float]) -> str:
+    parts = []
+    for pool_id in sorted(hashrates.keys()):
+        parts.append(f"{pool_id}{_float_token(float(hashrates[pool_id]))}")
+    return "_".join(parts)
+
+
+def plot_pool_scenarios(
+    output_path: Path,
+    *,
+    summary_index: Dict[Tuple[str, str, str], Dict[str, Any]],
+    experiment_id: str,
+    pool_id: str,
+    scenarios: Sequence[str],
+    metric: str = "delta",
+    title: Optional[str] = None,
+) -> Optional[Path]:
+    if metric not in {"delta", "count"}:
+        raise ValueError("metric must be one of: delta, count")
+
+    labels = ["Baseline"]
+    values: List[float] = []
+    errors: List[float] = []
+
+    baseline_ref: Optional[float] = None
+    for scenario_id in scenarios:
+        row = summary_index.get((experiment_id, scenario_id, pool_id))
+        if row is None:
+            return None
+        if baseline_ref is None:
+            baseline_ref = float(row["baseline_blocks"])
+
+    if baseline_ref is None:
+        return None
+
+    if metric == "delta":
+        values.append(0.0)
+        errors.append(0.0)
+    else:
+        values.append(baseline_ref)
+        errors.append(0.0)
+
+    for scenario_id in scenarios:
+        row = summary_index[(experiment_id, scenario_id, pool_id)]
+        labels.append(scenario_id)
+        if metric == "delta":
+            values.append(float(row["delta_mean"]))
+            errors.append(float(row["blocks_std"]))
+        else:
+            values.append(float(row["blocks_mean"]))
+            errors.append(float(row["blocks_std"]))
+
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "matplotlib is required for --save-plots but is not available"
+        ) from exc
+
+    ensure_dir(output_path.parent)
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+
+    x = np.arange(len(labels))
+    ax.errorbar(
+        x,
+        values,
+        yerr=errors,
+        fmt="-o",
+        color="#1b6ca8",
+        linewidth=2.0,
+        capsize=4,
+    )
+    ax.set_xticks(x, labels)
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.set_ylabel("Delta blocks" if metric == "delta" else "Canonical blocks")
+    ax.set_xlabel("Scenario")
+    if title:
+        ax.set_title(title)
+    if metric == "delta":
+        ax.axhline(0.0, color="#444444", linewidth=1.0, alpha=0.8)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
+def generate_section5_plots(
+    *,
+    summary_rows: Sequence[Dict[str, Any]],
+    figures_dir: Path,
+    metric: str,
+    traitor_id: str,
+) -> List[Path]:
+    summary_index: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for row in summary_rows:
+        key = (str(row["experiment_id"]), str(row["scenario_id"]), str(row["pool_id"]))
+        summary_index[key] = row
+
+    plot_specs: List[Tuple[str, str, Sequence[str], str]] = [
+        ("three_pools", "b", ("1.1", "1.2.1", "1.3"), "Three Pools - Pool b"),
+        ("three_pools", "s", ("1.1", "1.2.2", "1.3"), "Three Pools - Pool s"),
+        ("four_pools", "1", ("2.1", "2.2", "2.3"), "Four Pools - Pool 1"),
+        ("four_pools", "2", ("2.1", "2.2", "2.3"), "Four Pools - Pool 2"),
+        ("four_pools", "3", ("2.1", "2.2", "2.3"), "Four Pools - Pool 3"),
+    ]
+
+    created: List[Path] = []
+    for experiment_id, pool_id, scenarios, title in plot_specs:
+        reference_row = summary_index.get((experiment_id, scenarios[0], pool_id))
+        if reference_row is None:
+            continue
+
+        hashrates = json.loads(str(reference_row["hashrates"]))
+        gamma_token = _float_token(float(reference_row["gamma"]))
+        hashrates_token = _hashrates_token(hashrates)
+
+        filename = f"{experiment_id}_{pool_id}_{metric}_gamma{gamma_token}_{hashrates_token}"
+        if experiment_id == "four_pools":
+            filename += f"_traitor{traitor_id}"
+        output_path = figures_dir / f"{filename}.png"
+
+        saved = plot_pool_scenarios(
+            output_path,
+            summary_index=summary_index,
+            experiment_id=experiment_id,
+            pool_id=pool_id,
+            scenarios=scenarios,
+            metric=metric,
+            title=title,
+        )
+        if saved is not None:
+            created.append(saved)
+
+    return created
 
 
 def write_raw_csv(path: Path, raw_results: Sequence[RunResult]) -> None:
@@ -972,6 +1177,8 @@ def save_params_json(
             "target_blocks": config.target_blocks,
             "runs": config.runs,
             "base_seed": config.base_seed,
+            "results_dir": str(config.results_dir),
+            "figures_dir": str(config.figures_dir),
         },
         "betray_config": {
             "q": betray_config.q,
@@ -1003,7 +1210,9 @@ def run_all_experiments(
     four_hashrates: Dict[str, float],
     traitor_id: str,
     save_sample_event_logs: bool,
-) -> Tuple[List[RunResult], List[Dict[str, Any]]]:
+    save_plots: bool,
+    plot_metric: str,
+) -> Tuple[List[RunResult], List[Dict[str, Any]], List[Path]]:
     validate_hashrates(three_hashrates)
     validate_hashrates(four_hashrates)
 
@@ -1052,15 +1261,24 @@ def run_all_experiments(
         traitor_id=traitor_id,
     )
 
-    return raw_results, summary_rows
+    created_plots: List[Path] = []
+    if save_plots:
+        created_plots = generate_section5_plots(
+            summary_rows=summary_rows,
+            figures_dir=config.figures_dir,
+            metric=plot_metric,
+            traitor_id=traitor_id,
+        )
+
+    return raw_results, summary_rows, created_plots
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Section 5 Cartel-TBW simulation")
     parser.add_argument("--T", type=float, default=10.0)
-    parser.add_argument("--gamma", type=float, default=0.0)
+    parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--target-blocks", type=int, default=2016)
-    parser.add_argument("--runs", type=int, default=100)
+    parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--base-seed", type=int, default=20260223)
     parser.add_argument("--q", type=float, default=0.3)
     parser.add_argument("--betray-start-height", type=int, default=200)
@@ -1069,8 +1287,8 @@ def main() -> None:
     parser.add_argument("--traitor-id", choices=["1", "2", "3"], default="3")
     parser.add_argument(
         "--three-hashrates",
-        default="b=0.4,s=0.25,h=0.35",
-        help="comma-separated, e.g. b=0.4,s=0.25,h=0.35",
+        default="b=0.4,s=0.26,h=0.34",
+        help="comma-separated, e.g. b=0.4,s=0.26,h=0.34",
     )
     parser.add_argument(
         "--four-hashrates",
@@ -1078,7 +1296,14 @@ def main() -> None:
         help="comma-separated, e.g. 1=0.27,2=0.27,3=0.27,h=0.19",
     )
     parser.add_argument("--results-dir", default="results_section5")
+    parser.add_argument("--figures-dir", default="figures_section5")
     parser.add_argument("--save-sample-event-logs", action="store_true")
+    parser.add_argument("--save-plots", action="store_true")
+    parser.add_argument(
+        "--plot-metric",
+        choices=["delta", "count"],
+        default="delta",
+    )
 
     args = parser.parse_args()
 
@@ -1089,6 +1314,7 @@ def main() -> None:
         runs=args.runs,
         base_seed=args.base_seed,
         results_dir=Path(args.results_dir),
+        figures_dir=Path(args.figures_dir),
     )
     betray_config = BetrayConfig(
         q=args.q,
@@ -1101,13 +1327,15 @@ def main() -> None:
     three_hashrates = parse_hashrates(args.three_hashrates, ["b", "s", "h"])
     four_hashrates = parse_hashrates(args.four_hashrates, ["1", "2", "3", "h"])
 
-    raw_results, _ = run_all_experiments(
+    raw_results, _, created_plots = run_all_experiments(
         config=config,
         betray_config=betray_config,
         three_hashrates=three_hashrates,
         four_hashrates=four_hashrates,
         traitor_id=args.traitor_id,
         save_sample_event_logs=args.save_sample_event_logs,
+        save_plots=args.save_plots,
+        plot_metric=args.plot_metric,
     )
 
     print("Section 5 simulation completed")
@@ -1115,6 +1343,10 @@ def main() -> None:
     print(f"  total_run_rows = {len(raw_results)}")
     print(f"  raw_csv = {config.results_dir / 'raw_runs.csv'}")
     print(f"  summary_csv = {config.results_dir / 'summary.csv'}")
+    if args.save_plots:
+        print(f"  plot_metric = {args.plot_metric}")
+        print(f"  figures_dir = {config.figures_dir}")
+        print(f"  total_figures = {len(created_plots)}")
 
 
 if __name__ == "__main__":
