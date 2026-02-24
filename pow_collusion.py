@@ -3,1350 +3,1200 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from statistics import mean, stdev
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-EPS = 1e-12
+SCENARIO_ORDER = [
+    "AlwaysCartel",
+    "BetrayBreakShort",
+    "BetrayThenBreak",
+    "BetrayTolerated",
+]
 
 
-@dataclass
-class SimConfig:
-    T: float = 10.0
-    gamma: float = 0.1
-    target_blocks: int = 2016
-    runs: int = 10
-    base_seed: int = 20260223
-    results_dir: Path = Path("results_section5")
-    figures_dir: Path = Path("figures_section5")
+@dataclass(frozen=True)
+class PoolConfig:
+    pool_id: str
+    hashrate: float
 
 
-@dataclass
+@dataclass(frozen=True)
 class BetrayConfig:
-    q: float = 0.3
-    betray_start_height: int = 200
-    betray_threshold: int = 5
-    one_shot_betray: bool = True
-    one_shot_height: Optional[int] = None
-
-
-@dataclass
-class Scenario:
-    scenario_id: str
-    experiment_id: str
-    hashrates: Dict[str, float]
-    cartel_initial_members: Sequence[str]
+    mode: str  # none | short | prob
     traitor_id: Optional[str]
-    betray_mode: str  # none | one_shot | probabilistic
-    on_betray: str  # none | dissolve | kick
-    threshold_action: str  # none | dissolve
+    betray_on_nth_opportunity: int = 3
+    betray_start_height: int = 20
+    q: float = 0.7
+    betray_threshold: int = 10
+
+
+@dataclass(frozen=True)
+class ScenarioConfig:
+    name: str
+    mode: str  # long
+    initial_members: tuple[str, ...]
+    break_rule: str  # none | dissolve_immediate | kick_immediate | dissolve_threshold | kick_threshold
+    betray: BetrayConfig
+
+
+@dataclass(frozen=True)
+class SimConfig:
+    T: float
+    gamma: float
+    runs: int
+    target_blocks_long: int
+    betray_on_nth_opportunity: int
+    betray_start_height: int
+    q: float
+    betray_threshold: int
 
 
 @dataclass
 class Block:
-    block_id: int
+    id: int
     parent_id: Optional[int]
     height: int
     miner_id: str
     t_publish: float
+    is_public: bool = True
 
 
 @dataclass
 class PrivateBlock:
-    block_id: int
-    parent_id: int
+    id: int
+    parent_public_id: int
     height: int
     miner_id: str
     t_mine: float
 
 
 @dataclass
-class Process:
+class MiningProcess:
     pool_id: str
     target_tip_id: int
     lambda_rate: float
-    is_private: bool = False
+    target_kind: str  # public | private
 
 
 @dataclass
-class CartelCounters:
-    started: int = 0
-    success_2blocks: int = 0
-    abort: int = 0
-    release_only: int = 0
-    race_win: int = 0
-    race_lose: int = 0
+class NextEvent:
+    t_event: float
+    event_type: str  # MINE | RELEASE_CARTEL
+    mine_process: Optional[MiningProcess] = None
 
 
 @dataclass
 class RunResult:
-    scenario_id: str
-    experiment_id: str
+    experiment: str
+    scenario: str
+    mode: str
+    traitor_id: Optional[str]
     run_id: int
     seed: int
     T: float
     gamma: float
-    target_blocks: int
-    hashrates: Dict[str, float]
-    canonical_len: int
-    blocks_canonical_by_pool: Dict[str, int]
-    share_by_pool: Dict[str, float]
-    orphans_by_pool: Dict[str, int]
-    betray_count: int
-    cartel_end_height: Optional[int]
-    num_attacks_started: int
-    num_attacks_success_2blocks: int
-    num_attacks_abort: int
-    num_attacks_release_only: int
-    num_attacks_race_win: int
-    num_attacks_race_lose: int
     q: float
     betray_start_height: int
     betray_threshold: int
+    canonical_len: int
+    opportunity_count_traitor: int
+    betray_count: int
+    canon_len_at_betray: Optional[int]
+    opportunity_at_betray: Optional[int]
+    blocks_by_pool: Dict[str, int]
+    shares_by_pool: Dict[str, float]
 
-    def to_row(self) -> Dict[str, Any]:
-        return {
-            "scenario_id": self.scenario_id,
-            "experiment_id": self.experiment_id,
+    def to_row(self, pool_ids: Sequence[str]) -> Dict[str, Any]:
+        row: Dict[str, Any] = {
+            "experiment": self.experiment,
+            "scenario": self.scenario,
+            "mode": self.mode,
+            "traitor_id": "" if self.traitor_id is None else self.traitor_id,
             "run_id": self.run_id,
             "seed": self.seed,
             "T": self.T,
             "gamma": self.gamma,
-            "target_blocks": self.target_blocks,
-            "hashrates": json.dumps(self.hashrates, sort_keys=True),
-            "canonical_len": self.canonical_len,
-            "blocks_canonical_by_pool": json.dumps(
-                self.blocks_canonical_by_pool, sort_keys=True
-            ),
-            "share_by_pool": json.dumps(self.share_by_pool, sort_keys=True),
-            "orphans_by_pool": json.dumps(self.orphans_by_pool, sort_keys=True),
-            "betray_count": self.betray_count,
-            "cartel_end_height": (
-                "" if self.cartel_end_height is None else self.cartel_end_height
-            ),
-            "num_attacks_started": self.num_attacks_started,
-            "num_attacks_success_2blocks": self.num_attacks_success_2blocks,
-            "num_attacks_abort": self.num_attacks_abort,
-            "num_attacks_release_only": self.num_attacks_release_only,
-            "num_attacks_race_win": self.num_attacks_race_win,
-            "num_attacks_race_lose": self.num_attacks_race_lose,
             "q": self.q,
             "betray_start_height": self.betray_start_height,
             "betray_threshold": self.betray_threshold,
+            "canonical_len": self.canonical_len,
+            "opportunity_count_traitor": self.opportunity_count_traitor,
+            "betray_count": self.betray_count,
+            "canon_len_at_betray": (
+                "" if self.canon_len_at_betray is None else self.canon_len_at_betray
+            ),
+            "opportunity_at_betray": (
+                "" if self.opportunity_at_betray is None else self.opportunity_at_betray
+            ),
         }
+        for pool_id in pool_ids:
+            row[f"blocks_pool_{pool_id}"] = self.blocks_by_pool.get(pool_id, 0)
+            row[f"share_pool_{pool_id}"] = self.shares_by_pool.get(pool_id, 0.0)
+        return row
 
 
-class ChainState:
-    def __init__(self) -> None:
-        genesis = Block(
-            block_id=0,
-            parent_id=None,
-            height=0,
-            miner_id="G",
-            t_publish=0.0,
-        )
-        self.blocks_by_id: Dict[int, Block] = {0: genesis}
-        self.children_map: Dict[int, List[int]] = {0: []}
-        self.tips_set: set[int] = {0}
-        self._next_block_id = 1
-
-        self.canonical_tip_id = 0
-        self.canonical_chain_ids: List[int] = []
-
-    def new_block_id(self) -> int:
-        block_id = self._next_block_id
-        self._next_block_id += 1
-        return block_id
-
-    def _tip_sort_key(self, block_id: int) -> Tuple[int, float, int]:
-        block = self.blocks_by_id[block_id]
-        # Higher height is better; for ties earlier publish time is better.
-        return (block.height, -block.t_publish, -block.block_id)
-
-    def get_canonical_tip(self) -> int:
-        return max(self.tips_set, key=self._tip_sort_key)
-
-    def reconstruct_chain(self, tip_id: Optional[int] = None) -> List[int]:
-        tip = self.canonical_tip_id if tip_id is None else tip_id
-        chain: List[int] = []
-        cur = tip
-        while cur != 0:
-            chain.append(cur)
-            parent_id = self.blocks_by_id[cur].parent_id
-            if parent_id is None:
-                break
-            cur = parent_id
-        chain.reverse()
-        return chain
-
-    def refresh_canonical(self) -> None:
-        self.canonical_tip_id = self.get_canonical_tip()
-        self.canonical_chain_ids = self.reconstruct_chain(self.canonical_tip_id)
-
-    def publish_block(self, block: Block) -> None:
-        self.blocks_by_id[block.block_id] = block
-        self.children_map.setdefault(block.block_id, [])
-        if block.parent_id is not None:
-            self.children_map.setdefault(block.parent_id, []).append(block.block_id)
-
-        self.tips_set.add(block.block_id)
-        if block.parent_id is not None and block.parent_id in self.tips_set:
-            self.tips_set.remove(block.parent_id)
-
-        self.refresh_canonical()
-
-    @property
-    def canonical_len(self) -> int:
-        return len(self.canonical_chain_ids)
-
-    @property
-    def canonical_height(self) -> int:
-        return self.blocks_by_id[self.canonical_tip_id].height
-
-    def is_descendant(self, child_id: int, ancestor_id: int) -> bool:
-        cur: Optional[int] = child_id
-        while cur is not None:
-            if cur == ancestor_id:
-                return True
-            cur = self.blocks_by_id[cur].parent_id
-        return False
-
-    def count_canonical_blocks(self, pool_ids: Sequence[str]) -> Dict[str, int]:
-        counts = {pool: 0 for pool in pool_ids}
-        for block_id in self.canonical_chain_ids:
-            miner_id = self.blocks_by_id[block_id].miner_id
-            if miner_id in counts:
-                counts[miner_id] += 1
-        return counts
-
-    def count_orphans(self, pool_ids: Sequence[str]) -> Dict[str, int]:
-        canonical_ids = set(self.canonical_chain_ids)
-        counts = {pool: 0 for pool in pool_ids}
-        for block in self.blocks_by_id.values():
-            if block.block_id == 0:
-                continue
-            if block.block_id not in canonical_ids and block.miner_id in counts:
-                counts[block.miner_id] += 1
-        return counts
-
-
+@dataclass
 class CartelController:
-    def __init__(
-        self, members: Sequence[str], hashrates: Dict[str, float], T: float
+    members: set[str]
+    state: str = "IDLE"  # IDLE | WITHHOLD | RACE
+    base_height: Optional[int] = None
+    private_bn: Optional[PrivateBlock] = None
+    deadline: Optional[float] = None
+    race_cartel_tip_id: Optional[int] = None
+    race_honest_tip_id: Optional[int] = None
+
+    def cartel_power(self, rates: Dict[str, float]) -> float:
+        return sum(rates[pool_id] for pool_id in self.members)
+
+    def start_withhold(
+        self, private_bn: PrivateBlock, base_height: int, deadline: float
     ) -> None:
-        self.members: set[str] = set(members)
-        self.hashrates = hashrates
-        self.T = T
+        self.state = "WITHHOLD"
+        self.base_height = base_height
+        self.private_bn = private_bn
+        self.deadline = deadline
+        self.race_cartel_tip_id = None
+        self.race_honest_tip_id = None
 
-        self.state = "IDLE"  # IDLE | WITHHOLD | RACE
-        self.base_height: Optional[int] = None
-        self.private_bn: Optional[PrivateBlock] = None
-        self.private_bn1: Optional[PrivateBlock] = None
-        self.deadline: Optional[float] = None
-        self.race_tip_id: Optional[int] = None
+    def enter_race(self, cartel_tip_id: int, honest_tip_id: int) -> None:
+        self.state = "RACE"
+        self.private_bn = None
+        self.deadline = None
+        self.race_cartel_tip_id = cartel_tip_id
+        self.race_honest_tip_id = honest_tip_id
 
-        self.counters = CartelCounters()
-
-    def is_member(self, pool_id: str) -> bool:
-        return pool_id in self.members
-
-    def cartel_power(self) -> float:
-        return sum(self.hashrates[pool_id] for pool_id in self.members)
-
-    def has_active_cartel(self) -> bool:
-        return len(self.members) > 0
-
-    def w_star(self) -> float:
-        p = self.cartel_power()
-        if p <= 0.5 + EPS:
-            return 0.0
-        return max(-(self.T / p) * math.log(2.0 * (1.0 - p)), 0.0)
-
-    def can_start_tbw(self) -> bool:
-        return self.has_active_cartel() and self.w_star() > 0.0
-
-    def _reset_round_only(self) -> None:
+    def reset_round(self) -> None:
         self.state = "IDLE"
         self.base_height = None
         self.private_bn = None
-        self.private_bn1 = None
         self.deadline = None
-        self.race_tip_id = None
-
-    def dissolve(self) -> None:
-        self.members.clear()
-        self._reset_round_only()
-
-    def kick_member(self, pool_id: str) -> None:
-        self.members.discard(pool_id)
-        self._reset_round_only()
-
-    def enter_withhold(self, private_bn: PrivateBlock, t_now: float) -> None:
-        self.state = "WITHHOLD"
-        self.base_height = private_bn.height - 1
-        self.private_bn = private_bn
-        self.private_bn1 = None
-        self.deadline = t_now + self.w_star()
-        self.race_tip_id = None
-        self.counters.started += 1
-
-    def publish_double(self, chain: ChainState, t_now: float) -> None:
-        if self.private_bn is None or self.private_bn1 is None:
-            return
-
-        bn = Block(
-            block_id=self.private_bn.block_id,
-            parent_id=self.private_bn.parent_id,
-            height=self.private_bn.height,
-            miner_id=self.private_bn.miner_id,
-            t_publish=t_now,
-        )
-        bn1 = Block(
-            block_id=self.private_bn1.block_id,
-            parent_id=self.private_bn1.parent_id,
-            height=self.private_bn1.height,
-            miner_id=self.private_bn1.miner_id,
-            t_publish=t_now,
-        )
-
-        chain.publish_block(bn)
-        chain.publish_block(bn1)
-
-        self.counters.success_2blocks += 1
-        self._reset_round_only()
-
-    def on_deadline(self, chain: ChainState, t_now: float) -> None:
-        if self.state != "WITHHOLD" or self.deadline is None:
-            return
-        if self.private_bn is None or self.base_height is None:
-            self._reset_round_only()
-            return
-
-        if chain.canonical_height >= self.base_height + 2:
-            self.counters.abort += 1
-            self._reset_round_only()
-            return
-
-        bn = Block(
-            block_id=self.private_bn.block_id,
-            parent_id=self.private_bn.parent_id,
-            height=self.private_bn.height,
-            miner_id=self.private_bn.miner_id,
-            t_publish=t_now,
-        )
-        chain.publish_block(bn)
-        self.counters.release_only += 1
-
-        if chain.canonical_tip_id == bn.block_id:
-            self._reset_round_only()
-            return
-
-        self.state = "RACE"
-        self.private_bn = None
-        self.private_bn1 = None
-        self.deadline = None
-        self.race_tip_id = bn.block_id
-
-    def check_abort(self, chain: ChainState) -> None:
-        if self.state != "WITHHOLD" or self.base_height is None:
-            return
-        if chain.canonical_height >= self.base_height + 2:
-            self.counters.abort += 1
-            self._reset_round_only()
-
-    def resolve_race_if_finished(self, chain: ChainState) -> bool:
-        if self.state != "RACE" or self.base_height is None:
-            return False
-        if chain.canonical_height < self.base_height + 2:
-            return False
-
-        if self.race_tip_id is not None and chain.is_descendant(
-            chain.canonical_tip_id, self.race_tip_id
-        ):
-            self.counters.race_win += 1
-        else:
-            self.counters.race_lose += 1
-
-        self._reset_round_only()
-        return True
+        self.race_cartel_tip_id = None
+        self.race_honest_tip_id = None
 
 
-class Section5Simulation:
+class CollusionSimulation:
     def __init__(
         self,
         *,
-        config: SimConfig,
-        scenario: Scenario,
-        betray_config: BetrayConfig,
-        seed: int,
+        experiment: str,
+        sim_config: SimConfig,
+        pools: Sequence[PoolConfig],
+        scenario: ScenarioConfig,
         run_id: int,
-        log_events: bool = False,
-        max_events: Optional[int] = None,
+        seed: int,
+        max_events: int,
     ) -> None:
-        self.config = config
+        self.experiment = experiment
+        self.sim_config = sim_config
+        self.pools = list(pools)
+        self.pool_ids = [p.pool_id for p in self.pools]
+        self.pool_rates = {p.pool_id: p.hashrate for p in self.pools}
         self.scenario = scenario
-        self.betray_config = betray_config
-        self.seed = seed
         self.run_id = run_id
-        self.log_events = log_events
+        self.seed = seed
         self.max_events = max_events
 
         self.rng = np.random.default_rng(seed)
+
         self.t = 0.0
-        self.chain = ChainState()
-        self.cartel = CartelController(
-            members=scenario.cartel_initial_members,
-            hashrates=scenario.hashrates,
-            T=config.T,
+        genesis = Block(
+            id=0, parent_id=None, height=0, miner_id="GENESIS", t_publish=0.0
         )
+        self.blocks_by_id: Dict[int, Block] = {0: genesis}
+        self.tips: set[int] = {0}
+        self.canonical_tip_id = 0
+        self._next_public_id = 1
+        self._next_private_id = 1
 
+        self.controller = CartelController(members=set(self.scenario.initial_members))
+
+        self.opportunity_count_traitor = 0
         self.betray_count = 0
-        self.one_shot_done = False
-        self.cartel_end_height: Optional[int] = None
-        self.event_log: List[Dict[str, Any]] = []
+        self.betray_triggered = False
+        self.break_triggered = False
+        self.canon_len_at_betray: Optional[int] = None
+        self.opportunity_at_betray: Optional[int] = None
 
-    def _log(self, event: str, **kwargs: Any) -> None:
-        if not self.log_events:
-            return
-        row: Dict[str, Any] = {
-            "t": self.t,
-            "event": event,
-            "state": self.cartel.state,
-            "canonical_tip": self.chain.canonical_tip_id,
-            "canonical_height": self.chain.canonical_height,
-            "betray_count": self.betray_count,
-            "members": "|".join(sorted(self.cartel.members)),
-        }
-        row.update(kwargs)
-        self.event_log.append(row)
+    def canonical_height(self) -> int:
+        return self.blocks_by_id[self.canonical_tip_id].height
 
-    def _mine_private_block(self, parent_id: int, miner_id: str) -> PrivateBlock:
-        parent_height = self.chain.blocks_by_id[parent_id].height
-        return PrivateBlock(
-            block_id=self.chain.new_block_id(),
-            parent_id=parent_id,
-            height=parent_height + 1,
-            miner_id=miner_id,
-            t_mine=self.t,
+    def _canonical_key(self, block_id: int) -> tuple[int, float, int]:
+        blk = self.blocks_by_id[block_id]
+        return (blk.height, -blk.t_publish, -blk.id)
+
+    def get_canonical_tip(self) -> int:
+        return max(self.tips, key=self._canonical_key)
+
+    def reconstruct_chain(self, tip_id: Optional[int] = None) -> List[int]:
+        node = self.canonical_tip_id if tip_id is None else tip_id
+        chain: List[int] = []
+        while node is not None and node != 0:
+            chain.append(node)
+            node = self.blocks_by_id[node].parent_id
+        chain.reverse()
+        return chain
+
+    def count_blocks_on_chain(self, chain: Sequence[int]) -> Dict[str, int]:
+        counts = {pool_id: 0 for pool_id in self.pool_ids}
+        for block_id in chain:
+            miner = self.blocks_by_id[block_id].miner_id
+            if miner in counts:
+                counts[miner] += 1
+        return counts
+
+    def get_new_canonical_blocks_since(
+        self, old_tip_id: int, new_tip_id: int
+    ) -> List[int]:
+        if old_tip_id == new_tip_id:
+            return []
+        old_ancestors: set[int] = set()
+        node: Optional[int] = old_tip_id
+        while node is not None:
+            old_ancestors.add(node)
+            node = self.blocks_by_id[node].parent_id
+
+        path: List[int] = []
+        node = new_tip_id
+        while node is not None and node not in old_ancestors:
+            path.append(node)
+            node = self.blocks_by_id[node].parent_id
+        path.reverse()
+        return path
+
+    def is_descendant(self, child_id: int, ancestor_id: int) -> bool:
+        node: Optional[int] = child_id
+        while node is not None:
+            if node == ancestor_id:
+                return True
+            node = self.blocks_by_id[node].parent_id
+        return False
+
+    @staticmethod
+    def is_traitor_opportunity(
+        cartel_state: str,
+        mined_height: int,
+        public_tip_height: int,
+        miner_is_traitor_and_member: bool,
+    ) -> bool:
+        return (
+            miner_is_traitor_and_member
+            and cartel_state == "IDLE"
+            and mined_height == public_tip_height + 1
         )
+
+    def should_betray_short(self) -> bool:
+        return (
+            self.opportunity_count_traitor
+            == self.scenario.betray.betray_on_nth_opportunity
+        )
+
+    def should_betray_prob(self) -> bool:
+        if self.canonical_height() < self.scenario.betray.betray_start_height:
+            return False
+        return bool(self.rng.random() < self.scenario.betray.q)
+
+    def _new_public_id(self) -> int:
+        block_id = self._next_public_id
+        self._next_public_id += 1
+        return block_id
+
+    def _new_private_id(self) -> int:
+        block_id = self._next_private_id
+        self._next_private_id += 1
+        return block_id
+
+    def _w_star(self, p: float) -> float:
+        if p <= 0.0:
+            return 0.0
+        if p >= 1.0:
+            return self.sim_config.T
+        value = -(self.sim_config.T / p) * math.log(2.0 * (1.0 - p))
+        return max(value, 0.0)
 
     def _publish_public_block(
-        self, parent_id: int, miner_id: str, t_publish: float
-    ) -> int:
-        parent = self.chain.blocks_by_id[parent_id]
+        self, parent_id: int, miner_id: str, t_publish: Optional[float] = None
+    ) -> Block:
+        t_block = self.t if t_publish is None else t_publish
+        block_id = self._new_public_id()
+        height = self.blocks_by_id[parent_id].height + 1
         block = Block(
-            block_id=self.chain.new_block_id(),
+            id=block_id,
             parent_id=parent_id,
-            height=parent.height + 1,
+            height=height,
             miner_id=miner_id,
-            t_publish=t_publish,
+            t_publish=t_block,
+            is_public=True,
         )
-        self.chain.publish_block(block)
-        return block.block_id
+        old_tip = self.canonical_tip_id
+        self.blocks_by_id[block_id] = block
+        self.tips.add(block_id)
+        self.tips.discard(parent_id)
+        self.canonical_tip_id = self.get_canonical_tip()
+        _ = self.get_new_canonical_blocks_since(old_tip, self.canonical_tip_id)
+        return block
 
-    def _tip_sort_key(self, tip_id: int) -> Tuple[int, float, int]:
-        block = self.chain.blocks_by_id[tip_id]
-        return (block.height, -block.t_publish, -block.block_id)
-
-    def _race_tie_tips(self) -> Optional[Tuple[int, int]]:
-        if self.cartel.state != "RACE" or self.cartel.race_tip_id is None:
-            return None
-
-        cartel_tips = [
-            tip
-            for tip in self.chain.tips_set
-            if self.chain.is_descendant(tip, self.cartel.race_tip_id)
+    def _select_honest_tip_for_race(self, cartel_tip_id: int) -> Optional[int]:
+        cartel_height = self.blocks_by_id[cartel_tip_id].height
+        candidates = [
+            tip_id
+            for tip_id in self.tips
+            if tip_id != cartel_tip_id
+            and self.blocks_by_id[tip_id].height == cartel_height
         ]
-        non_cartel_tips = [
-            tip
-            for tip in self.chain.tips_set
-            if not self.chain.is_descendant(tip, self.cartel.race_tip_id)
-        ]
-
-        if not cartel_tips or not non_cartel_tips:
+        if not candidates:
             return None
+        return max(candidates, key=self._canonical_key)
 
-        cartel_tip = max(cartel_tips, key=self._tip_sort_key)
-        non_cartel_tip = max(non_cartel_tips, key=self._tip_sort_key)
+    def build_mining_processes(self) -> List[MiningProcess]:
+        processes: List[MiningProcess] = []
 
-        if (
-            self.chain.blocks_by_id[cartel_tip].height
-            != self.chain.blocks_by_id[non_cartel_tip].height
-        ):
-            return None
-        return cartel_tip, non_cartel_tip
+        tie_active = False
+        cartel_tip_id: Optional[int] = None
+        honest_tip_id: Optional[int] = None
+        if self.controller.state == "RACE":
+            cartel_tip_id = self.controller.race_cartel_tip_id
+            honest_tip_id = self.controller.race_honest_tip_id
+            if (
+                cartel_tip_id is not None
+                and honest_tip_id is not None
+                and cartel_tip_id in self.tips
+                and honest_tip_id in self.tips
+                and self.blocks_by_id[cartel_tip_id].height
+                == self.blocks_by_id[honest_tip_id].height
+            ):
+                tie_active = True
+            else:
+                self.controller.reset_round()
 
-    def build_mining_processes(self) -> List[Process]:
-        processes: List[Process] = []
-        tie_tips = self._race_tie_tips()
-
-        for pool_id, hashrate in self.scenario.hashrates.items():
-            rate = hashrate / self.config.T
-            if rate <= EPS:
+        for pool_id in self.pool_ids:
+            rate = self.pool_rates[pool_id] / self.sim_config.T
+            if rate <= 0.0:
                 continue
 
-            if self.cartel.is_member(pool_id):
+            if pool_id in self.controller.members:
                 if (
-                    self.cartel.state == "WITHHOLD"
-                    and self.cartel.private_bn is not None
+                    self.controller.state == "WITHHOLD"
+                    and self.controller.private_bn is not None
                 ):
                     processes.append(
-                        Process(
+                        MiningProcess(
                             pool_id=pool_id,
-                            target_tip_id=self.cartel.private_bn.block_id,
+                            target_tip_id=self.controller.private_bn.id,
                             lambda_rate=rate,
-                            is_private=True,
+                            target_kind="private",
                         )
                     )
-                elif (
-                    self.cartel.state == "RACE" and self.cartel.race_tip_id is not None
-                ):
+                    continue
+                if tie_active and cartel_tip_id is not None:
                     processes.append(
-                        Process(
+                        MiningProcess(
                             pool_id=pool_id,
-                            target_tip_id=self.cartel.race_tip_id,
+                            target_tip_id=cartel_tip_id,
                             lambda_rate=rate,
-                            is_private=False,
+                            target_kind="public",
                         )
                     )
-                else:
-                    processes.append(
-                        Process(
-                            pool_id=pool_id,
-                            target_tip_id=self.chain.canonical_tip_id,
-                            lambda_rate=rate,
-                            is_private=False,
-                        )
-                    )
-                continue
+                    continue
 
-            if tie_tips is not None:
-                cartel_tip, honest_tip = tie_tips
-                rate_cartel = self.config.gamma * rate
-                rate_honest = (1.0 - self.config.gamma) * rate
-                if rate_cartel > EPS:
+            if tie_active and cartel_tip_id is not None and honest_tip_id is not None:
+                if pool_id in self.controller.members:
+                    continue
+                rate_cartel = self.sim_config.gamma * rate
+                rate_honest = (1.0 - self.sim_config.gamma) * rate
+                if rate_cartel > 0.0:
                     processes.append(
-                        Process(
+                        MiningProcess(
                             pool_id=pool_id,
-                            target_tip_id=cartel_tip,
+                            target_tip_id=cartel_tip_id,
                             lambda_rate=rate_cartel,
-                            is_private=False,
+                            target_kind="public",
                         )
                     )
-                if rate_honest > EPS:
+                if rate_honest > 0.0:
                     processes.append(
-                        Process(
+                        MiningProcess(
                             pool_id=pool_id,
-                            target_tip_id=honest_tip,
+                            target_tip_id=honest_tip_id,
                             lambda_rate=rate_honest,
-                            is_private=False,
+                            target_kind="public",
                         )
                     )
             else:
                 processes.append(
-                    Process(
+                    MiningProcess(
                         pool_id=pool_id,
-                        target_tip_id=self.chain.canonical_tip_id,
+                        target_tip_id=self.canonical_tip_id,
                         lambda_rate=rate,
-                        is_private=False,
+                        target_kind="public",
                     )
                 )
 
         return processes
 
-    def sample_next_event(self, processes: Sequence[Process]) -> Dict[str, Any]:
-        best_time = float("inf")
-        best_process: Optional[Process] = None
+    def sample_next_event(self, processes: Sequence[MiningProcess]) -> NextEvent:
+        if not processes:
+            raise RuntimeError("No mining processes available.")
 
+        next_mine_t = math.inf
+        next_process: Optional[MiningProcess] = None
         for process in processes:
-            if process.lambda_rate <= EPS:
-                continue
-            candidate = self.t + float(self.rng.exponential(1.0 / process.lambda_rate))
-            if candidate < best_time:
-                best_time = candidate
-                best_process = process
+            dt = float(self.rng.exponential(1.0 / process.lambda_rate))
+            t_event = self.t + dt
+            if t_event < next_mine_t:
+                next_mine_t = t_event
+                next_process = process
 
-        deadline = self.cartel.deadline
-        if deadline is not None and deadline <= best_time:
-            return {"type": "RELEASE_CARTEL", "time": deadline}
-
-        if best_process is None:
-            raise RuntimeError("No valid mining process available")
-
-        return {"type": "MINE", "time": best_time, "process": best_process}
-
-    def should_betray(self, pool_id: str) -> bool:
-        if self.scenario.traitor_id is None or pool_id != self.scenario.traitor_id:
-            return False
-
-        public_height = self.chain.canonical_height
-
-        if self.scenario.betray_mode == "none":
-            return False
-
-        if self.scenario.betray_mode == "one_shot":
-            if not self.betray_config.one_shot_betray or self.one_shot_done:
-                return False
-            if (
-                self.betray_config.one_shot_height is not None
-                and public_height < self.betray_config.one_shot_height
-            ):
-                return False
-            return True
-
-        if self.scenario.betray_mode == "probabilistic":
-            if public_height < self.betray_config.betray_start_height:
-                return False
-            return bool(self.rng.random() < self.betray_config.q)
-
-        raise ValueError(f"Unknown betray mode: {self.scenario.betray_mode}")
-
-    def apply_scenario_consequence(self, betrayer_pool_id: str) -> None:
-        if self.scenario.on_betray == "dissolve":
-            if self.cartel.has_active_cartel():
-                self.cartel.dissolve()
-                if self.cartel_end_height is None:
-                    self.cartel_end_height = self.chain.canonical_height
-        elif self.scenario.on_betray == "kick":
-            if self.cartel.has_active_cartel():
-                self.cartel.kick_member(betrayer_pool_id)
-                if self.cartel_end_height is None:
-                    self.cartel_end_height = self.chain.canonical_height
-
+        deadline = self.controller.deadline
         if (
-            self.scenario.threshold_action == "dissolve"
-            and self.betray_count >= self.betray_config.betray_threshold
-            and self.cartel.has_active_cartel()
+            self.controller.state == "WITHHOLD"
+            and deadline is not None
+            and deadline <= next_mine_t
         ):
-            self.cartel.dissolve()
-            if self.cartel_end_height is None:
-                self.cartel_end_height = self.chain.canonical_height
+            return NextEvent(t_event=deadline, event_type="RELEASE_CARTEL")
 
-    def is_first_block_opportunity(self, process: Process) -> bool:
-        return (
-            self.cartel.state == "IDLE"
-            and process.target_tip_id == self.chain.canonical_tip_id
-            and not process.is_private
+        if next_process is None:
+            raise RuntimeError("Failed to sample mining event.")
+        return NextEvent(
+            t_event=next_mine_t, event_type="MINE", mine_process=next_process
         )
 
-    def apply_mine_event(self, process: Process) -> None:
-        pool_id = process.pool_id
+    def check_abort_condition(self) -> None:
+        if self.controller.state != "WITHHOLD" or self.controller.base_height is None:
+            return
+        if self.canonical_height() >= self.controller.base_height + 2:
+            self.controller.reset_round()
 
-        if process.is_private:
-            if self.cartel.state != "WITHHOLD" or self.cartel.private_bn is None:
-                return
-
-            bn = self.cartel.private_bn
-            bn1 = PrivateBlock(
-                block_id=self.chain.new_block_id(),
-                parent_id=bn.block_id,
-                height=bn.height + 1,
-                miner_id=pool_id,
-                t_mine=self.t,
-            )
-            self.cartel.private_bn1 = bn1
-            self._log(
-                "withhold_second_block",
-                pool_id=pool_id,
-                bn_id=bn.block_id,
-                bn1_id=bn1.block_id,
-            )
-            self.cartel.publish_double(self.chain, self.t)
-            self._log("double_publish", bn_id=bn.block_id, bn1_id=bn1.block_id)
+    def check_race_resolution(self, block: Block) -> None:
+        if self.controller.state != "RACE" or self.controller.base_height is None:
+            return
+        if block.height < self.controller.base_height + 2:
             return
 
-        if self.cartel.is_member(pool_id):
-            if self.is_first_block_opportunity(process):
-                if self.should_betray(pool_id):
-                    block_id = self._publish_public_block(
-                        parent_id=process.target_tip_id,
-                        miner_id=pool_id,
-                        t_publish=self.t,
-                    )
-                    self.betray_count += 1
-                    if self.scenario.betray_mode == "one_shot":
-                        self.one_shot_done = True
-                    self.apply_scenario_consequence(pool_id)
-                    self._log(
-                        "betray_publish",
-                        pool_id=pool_id,
-                        block_id=block_id,
-                        betray_count=self.betray_count,
-                    )
-                    return
+        cartel_tip_id = self.controller.race_cartel_tip_id
+        honest_tip_id = self.controller.race_honest_tip_id
+        if cartel_tip_id is not None and self.is_descendant(block.id, cartel_tip_id):
+            self.controller.reset_round()
+            return
+        if honest_tip_id is not None and self.is_descendant(block.id, honest_tip_id):
+            self.controller.reset_round()
 
-                if self.cartel.can_start_tbw():
-                    private_bn = self._mine_private_block(
-                        parent_id=process.target_tip_id,
-                        miner_id=pool_id,
-                    )
-                    self.cartel.enter_withhold(private_bn, self.t)
-                    self._log(
-                        "enter_withhold",
-                        pool_id=pool_id,
-                        private_bn_id=private_bn.block_id,
-                        base_height=self.cartel.base_height,
-                        deadline=self.cartel.deadline,
-                    )
-                    return
+    def break_cartel_dissolve(self) -> None:
+        self.controller.members.clear()
+        self.controller.reset_round()
 
-            block_id = self._publish_public_block(
-                parent_id=process.target_tip_id,
-                miner_id=pool_id,
-                t_publish=self.t,
-            )
-            self._log("cartel_public_mine", pool_id=pool_id, block_id=block_id)
+    def break_cartel_kick(self, traitor_id: str) -> None:
+        self.controller.members.discard(traitor_id)
+        self.controller.reset_round()
+
+    def _apply_break_if_needed(self) -> None:
+        rule = self.scenario.break_rule
+        traitor_id = self.scenario.betray.traitor_id
+
+        if rule == "none":
             return
 
-        block_id = self._publish_public_block(
-            parent_id=process.target_tip_id,
-            miner_id=pool_id,
+        should_break = False
+        if rule.endswith("_immediate"):
+            should_break = True
+        elif rule.endswith("_threshold"):
+            should_break = self.betray_count >= self.scenario.betray.betray_threshold
+
+        if not should_break:
+            return
+
+        if rule.startswith("dissolve"):
+            self.break_cartel_dissolve()
+        elif rule.startswith("kick"):
+            if traitor_id is None:
+                raise RuntimeError("kick break rule requires traitor_id")
+            self.break_cartel_kick(traitor_id)
+        else:
+            raise RuntimeError(f"Unknown break rule: {rule}")
+
+        self.break_triggered = True
+        if self.canon_len_at_betray is None:
+            self.canon_len_at_betray = self.canonical_height()
+
+    def _on_member_first_block(self, miner_id: str, parent_id: int) -> None:
+        mined_height = self.blocks_by_id[parent_id].height + 1
+        public_tip_height = self.canonical_height()
+
+        traitor_id = self.scenario.betray.traitor_id
+        miner_is_traitor_and_member = (
+            traitor_id is not None
+            and miner_id == traitor_id
+            and miner_id in self.controller.members
+        )
+
+        should_betray = False
+        if self.is_traitor_opportunity(
+            cartel_state=self.controller.state,
+            mined_height=mined_height,
+            public_tip_height=public_tip_height,
+            miner_is_traitor_and_member=miner_is_traitor_and_member,
+        ):
+            self.opportunity_count_traitor += 1
+            if self.scenario.betray.mode == "short":
+                should_betray = self.should_betray_short()
+            elif self.scenario.betray.mode == "prob":
+                should_betray = self.should_betray_prob()
+
+        if should_betray:
+            block = self._publish_public_block(parent_id=parent_id, miner_id=miner_id)
+            self.betray_count += 1
+            self.betray_triggered = True
+            self.opportunity_at_betray = self.opportunity_count_traitor
+            self.canon_len_at_betray = self.canonical_height()
+            self._apply_break_if_needed()
+            if self.controller.state == "RACE":
+                self.check_race_resolution(block)
+            return
+
+        p_cartel = self.controller.cartel_power(self.pool_rates)
+        deadline = self.t + self._w_star(p_cartel)
+        private_bn = PrivateBlock(
+            id=self._new_private_id(),
+            parent_public_id=parent_id,
+            height=mined_height,
+            miner_id=miner_id,
+            t_mine=self.t,
+        )
+        self.controller.start_withhold(
+            private_bn=private_bn,
+            base_height=public_tip_height,
+            deadline=deadline,
+        )
+
+    def _on_private_mine(self, miner_id: str) -> None:
+        if self.controller.state != "WITHHOLD" or self.controller.private_bn is None:
+            return
+
+        private_bn = self.controller.private_bn
+        public_bn = self._publish_public_block(
+            parent_id=private_bn.parent_public_id,
+            miner_id=private_bn.miner_id,
             t_publish=self.t,
         )
-        self._log(
-            "honest_public_mine",
-            pool_id=pool_id,
-            block_id=block_id,
-            target_tip_id=process.target_tip_id,
+        _ = self._publish_public_block(
+            parent_id=public_bn.id,
+            miner_id=miner_id,
+            t_publish=self.t,
         )
+        self.controller.reset_round()
 
-    def apply_release_event(self) -> None:
-        before_state = self.cartel.state
-        before_abort = self.cartel.counters.abort
-        before_release_only = self.cartel.counters.release_only
+    def _on_public_mine(self, miner_id: str, target_tip_id: int) -> None:
+        if (
+            self.controller.state == "IDLE"
+            and miner_id in self.controller.members
+            and target_tip_id == self.canonical_tip_id
+        ):
+            self._on_member_first_block(miner_id=miner_id, parent_id=target_tip_id)
+            return
 
-        self.cartel.on_deadline(self.chain, self.t)
+        block = self._publish_public_block(parent_id=target_tip_id, miner_id=miner_id)
+        if (
+            self.controller.state == "WITHHOLD"
+            and miner_id not in self.controller.members
+        ):
+            self.check_abort_condition()
+        if self.controller.state == "RACE":
+            self.check_race_resolution(block)
 
-        if self.cartel.counters.abort > before_abort:
-            self._log("release_abort")
-        elif self.cartel.counters.release_only > before_release_only:
-            if self.cartel.state == "RACE":
-                self._log("release_enter_race", race_tip_id=self.cartel.race_tip_id)
+    def on_deadline(self) -> None:
+        if self.controller.state != "WITHHOLD" or self.controller.private_bn is None:
+            return
+
+        private_bn = self.controller.private_bn
+        public_bn = self._publish_public_block(
+            parent_id=private_bn.parent_public_id,
+            miner_id=private_bn.miner_id,
+            t_publish=self.t,
+        )
+        honest_tip_id = self._select_honest_tip_for_race(public_bn.id)
+        if honest_tip_id is None:
+            self.controller.reset_round()
+        else:
+            self.controller.enter_race(
+                cartel_tip_id=public_bn.id, honest_tip_id=honest_tip_id
+            )
+
+    def _should_stop(self) -> bool:
+        return self.canonical_height() >= self.sim_config.target_blocks_long
+
+    def _summarize(self) -> RunResult:
+        canonical_chain = self.reconstruct_chain()
+        denominator = self.sim_config.target_blocks_long
+        chain_slice = canonical_chain[:denominator]
+
+        if denominator <= 0:
+            denominator = len(chain_slice)
+
+        blocks_by_pool = self.count_blocks_on_chain(chain_slice)
+        shares_by_pool: Dict[str, float] = {}
+        for pool_id in self.pool_ids:
+            if denominator > 0:
+                shares_by_pool[pool_id] = blocks_by_pool[pool_id] / denominator
             else:
-                self._log("release_no_race")
-        elif before_state == "WITHHOLD":
-            self._log("release_ignored")
-
-    def collect_result(self) -> RunResult:
-        pool_ids = list(self.scenario.hashrates.keys())
-        canonical_counts = self.chain.count_canonical_blocks(pool_ids)
-        orphans_counts = self.chain.count_orphans(pool_ids)
-        canonical_len = self.chain.canonical_len
-
-        share = {
-            pool: (canonical_counts[pool] / canonical_len if canonical_len > 0 else 0.0)
-            for pool in pool_ids
-        }
+                shares_by_pool[pool_id] = 0.0
 
         return RunResult(
-            scenario_id=self.scenario.scenario_id,
-            experiment_id=self.scenario.experiment_id,
+            experiment=self.experiment,
+            scenario=self.scenario.name,
+            mode=self.scenario.mode,
+            traitor_id=self.scenario.betray.traitor_id,
             run_id=self.run_id,
             seed=self.seed,
-            T=self.config.T,
-            gamma=self.config.gamma,
-            target_blocks=self.config.target_blocks,
-            hashrates=dict(self.scenario.hashrates),
-            canonical_len=canonical_len,
-            blocks_canonical_by_pool=canonical_counts,
-            share_by_pool=share,
-            orphans_by_pool=orphans_counts,
+            T=self.sim_config.T,
+            gamma=self.sim_config.gamma,
+            q=self.scenario.betray.q,
+            betray_start_height=self.scenario.betray.betray_start_height,
+            betray_threshold=self.scenario.betray.betray_threshold,
+            canonical_len=denominator,
+            opportunity_count_traitor=self.opportunity_count_traitor,
             betray_count=self.betray_count,
-            cartel_end_height=self.cartel_end_height,
-            num_attacks_started=self.cartel.counters.started,
-            num_attacks_success_2blocks=self.cartel.counters.success_2blocks,
-            num_attacks_abort=self.cartel.counters.abort,
-            num_attacks_release_only=self.cartel.counters.release_only,
-            num_attacks_race_win=self.cartel.counters.race_win,
-            num_attacks_race_lose=self.cartel.counters.race_lose,
-            q=self.betray_config.q,
-            betray_start_height=self.betray_config.betray_start_height,
-            betray_threshold=self.betray_config.betray_threshold,
+            canon_len_at_betray=self.canon_len_at_betray,
+            opportunity_at_betray=self.opportunity_at_betray,
+            blocks_by_pool=blocks_by_pool,
+            shares_by_pool=shares_by_pool,
         )
 
-    def run(self) -> Tuple[RunResult, List[Dict[str, Any]]]:
-        events = 0
-
-        while self.chain.canonical_len < self.config.target_blocks:
-            if self.max_events is not None and events >= self.max_events:
-                raise RuntimeError("Reached max_events before termination")
+    def simulate_one_run(self) -> RunResult:
+        num_events = 0
+        while not self._should_stop():
+            if num_events >= self.max_events:
+                raise RuntimeError(
+                    f"Exceeded max_events={self.max_events}, scenario={self.scenario.name}, run={self.run_id}"
+                )
+            num_events += 1
 
             processes = self.build_mining_processes()
             event = self.sample_next_event(processes)
-            self.t = event["time"]
+            self.t = event.t_event
 
-            if event["type"] == "RELEASE_CARTEL":
-                self.apply_release_event()
+            if event.event_type == "RELEASE_CARTEL":
+                self.on_deadline()
+                continue
+            if event.mine_process is None:
+                raise RuntimeError("MINE event without process")
+
+            process = event.mine_process
+            if process.target_kind == "private":
+                self._on_private_mine(miner_id=process.pool_id)
             else:
-                self.apply_mine_event(event["process"])
+                self._on_public_mine(
+                    miner_id=process.pool_id, target_tip_id=process.target_tip_id
+                )
 
-            self.cartel.check_abort(self.chain)
-            self.cartel.resolve_race_if_finished(self.chain)
-            events += 1
-
-        return self.collect_result(), self.event_log
+        return self._summarize()
 
 
-def validate_hashrates(hashrates: Dict[str, float]) -> None:
-    if not hashrates:
-        raise ValueError("hashrates must not be empty")
-    total = 0.0
-    for pool_id, value in hashrates.items():
-        if value <= 0.0 or value >= 1.0:
-            raise ValueError(f"Invalid hashrate for {pool_id}: {value}")
-        total += value
-    if abs(total - 1.0) > 1e-9:
-        raise ValueError(f"Hashrates must sum to 1.0, got {total}")
-
-
-def parse_hashrates(raw: str, expected_pools: Sequence[str]) -> Dict[str, float]:
-    mapping: Dict[str, float] = {}
-    for token in raw.split(","):
-        item = token.strip()
-        if not item:
+def parse_pool_spec(spec: str) -> List[PoolConfig]:
+    pools: List[PoolConfig] = []
+    seen: set[str] = set()
+    for item in spec.split(","):
+        token = item.strip()
+        if not token:
             continue
-        if "=" not in item:
-            raise ValueError(f"Invalid hashrate token: {item}")
-        key, val = item.split("=", 1)
-        mapping[key.strip()] = float(val.strip())
-
-    expected_set = set(expected_pools)
-    got_set = set(mapping.keys())
-    if got_set != expected_set:
-        raise ValueError(
-            f"Expected pools {sorted(expected_set)}, got {sorted(got_set)}"
-        )
-
-    validate_hashrates(mapping)
-    return mapping
+        if "=" not in token:
+            raise ValueError(f"Invalid pool spec token: {token}")
+        pool_id, value = token.split("=", 1)
+        pool_id = pool_id.strip()
+        if pool_id in seen:
+            raise ValueError(f"Duplicated pool id in spec: {pool_id}")
+        hashrate = float(value.strip())
+        pools.append(PoolConfig(pool_id=pool_id, hashrate=hashrate))
+        seen.add(pool_id)
+    if not pools:
+        raise ValueError("Empty pool spec")
+    return pools
 
 
-def derive_seed(base_seed: int, scenario_id: str, run_id: int) -> int:
-    token = f"{base_seed}|{scenario_id}|{run_id}"
-    digest = hashlib.sha256(token.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
-
-
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-
-def write_csv(
-    path: Path, rows: List[Dict[str, Any]], fieldnames: Sequence[str]
+def validate_inputs(
+    sim_config: SimConfig,
+    three_pools: Sequence[PoolConfig],
+    four_pools: Sequence[PoolConfig],
+    three_traitor: str,
+    four_traitor: str,
 ) -> None:
-    ensure_dir(path.parent)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    if sim_config.T <= 0:
+        raise ValueError("T must be > 0")
+    if not (0.0 <= sim_config.gamma <= 1.0):
+        raise ValueError("gamma must be in [0, 1]")
+    if sim_config.runs <= 0:
+        raise ValueError("runs must be positive")
+    if sim_config.target_blocks_long <= 0:
+        raise ValueError("target_blocks_long must be positive")
+    if sim_config.betray_on_nth_opportunity <= 0:
+        raise ValueError("betray_on_nth_opportunity must be positive")
+    if sim_config.betray_start_height < 0:
+        raise ValueError("betray_start_height must be >= 0")
+    if not (0.0 <= sim_config.q <= 1.0):
+        raise ValueError("q must be in [0, 1]")
+    if sim_config.betray_threshold <= 0:
+        raise ValueError("betray_threshold must be positive")
+
+    for name, pools in (("three", three_pools), ("four", four_pools)):
+        total = sum(p.hashrate for p in pools)
+        if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError(f"{name} hashrates must sum to 1.0, got {total}")
+        for pool in pools:
+            if pool.hashrate < 0.0:
+                raise ValueError(
+                    f"{name} has negative hashrate: {pool.pool_id}={pool.hashrate}"
+                )
+
+    three_ids = {p.pool_id for p in three_pools}
+    four_ids = {p.pool_id for p in four_pools}
+    if {"b", "s", "h"} - three_ids:
+        raise ValueError("three_pools must contain ids: b,s,h")
+    if {"1", "2", "3", "h"} - four_ids:
+        raise ValueError("four_pools must contain ids: 1,2,3,h")
+    if three_traitor not in three_ids:
+        raise ValueError(f"three_traitor {three_traitor} not in pools")
+    if four_traitor not in four_ids:
+        raise ValueError(f"four_traitor {four_traitor} not in pools")
+    if three_traitor not in {"b", "s"}:
+        raise ValueError("three_traitor must be one of b,s")
+    if four_traitor not in {"1", "2", "3"}:
+        raise ValueError("four_traitor must be one of 1,2,3")
 
 
 def build_scenarios(
-    three_hashrates: Dict[str, float],
-    four_hashrates: Dict[str, float],
-    traitor_id: str,
-) -> List[Scenario]:
-    scenarios: List[Scenario] = [
-        Scenario(
-            scenario_id="1.1",
-            experiment_id="three_pools",
-            hashrates=three_hashrates,
-            cartel_initial_members=["b", "s"],
-            traitor_id=None,
-            betray_mode="none",
-            on_betray="none",
-            threshold_action="none",
-        ),
-        Scenario(
-            scenario_id="1.2.1",
-            experiment_id="three_pools",
-            hashrates=three_hashrates,
-            cartel_initial_members=["b", "s"],
-            traitor_id="b",
-            betray_mode="one_shot",
-            on_betray="dissolve",
-            threshold_action="none",
-        ),
-        Scenario(
-            scenario_id="1.2.2",
-            experiment_id="three_pools",
-            hashrates=three_hashrates,
-            cartel_initial_members=["b", "s"],
-            traitor_id="s",
-            betray_mode="one_shot",
-            on_betray="dissolve",
-            threshold_action="none",
-        ),
-        Scenario(
-            scenario_id="1.3",
-            experiment_id="three_pools",
-            hashrates=three_hashrates,
-            cartel_initial_members=["b", "s"],
-            traitor_id="s",
-            betray_mode="probabilistic",
-            on_betray="none",
-            threshold_action="dissolve",
-        ),
-        Scenario(
-            scenario_id="2.1",
-            experiment_id="four_pools",
-            hashrates=four_hashrates,
-            cartel_initial_members=["1", "2", "3"],
-            traitor_id=None,
-            betray_mode="none",
-            on_betray="none",
-            threshold_action="none",
-        ),
-        Scenario(
-            scenario_id="2.2",
-            experiment_id="four_pools",
-            hashrates=four_hashrates,
-            cartel_initial_members=["1", "2", "3"],
-            traitor_id=traitor_id,
-            betray_mode="one_shot",
-            on_betray="kick",
-            threshold_action="none",
-        ),
-        Scenario(
-            scenario_id="2.3",
-            experiment_id="four_pools",
-            hashrates=four_hashrates,
-            cartel_initial_members=["1", "2", "3"],
-            traitor_id=traitor_id,
-            betray_mode="probabilistic",
-            on_betray="none",
-            threshold_action="none",
-        ),
-    ]
-    return scenarios
-
-
-def summarize_runs(raw_results: Sequence[RunResult]) -> List[Dict[str, Any]]:
-    grouped: Dict[Tuple[str, str, str], List[RunResult]] = {}
-    for result in raw_results:
-        for pool_id in result.hashrates.keys():
-            key = (result.experiment_id, result.scenario_id, pool_id)
-            grouped.setdefault(key, []).append(result)
-
-    summary_rows: List[Dict[str, Any]] = []
-    for (experiment_id, scenario_id, pool_id), runs in sorted(grouped.items()):
-        first = runs[0]
-        hashrate = float(first.hashrates[pool_id])
-        target_blocks = int(first.target_blocks)
-        baseline_blocks = hashrate * target_blocks
-
-        blocks = [float(r.blocks_canonical_by_pool[pool_id]) for r in runs]
-        shares = [float(r.share_by_pool[pool_id]) for r in runs]
-        betray_counts = [float(r.betray_count) for r in runs]
-        end_heights = [
-            float(r.cartel_end_height) for r in runs if r.cartel_end_height is not None
-        ]
-
-        blocks_mean = float(np.mean(blocks)) if blocks else 0.0
-        blocks_std = float(np.std(blocks, ddof=1)) if len(blocks) > 1 else 0.0
-        share_mean = float(np.mean(shares)) if shares else 0.0
-        share_std = float(np.std(shares, ddof=1)) if len(shares) > 1 else 0.0
-        betray_count_mean = float(np.mean(betray_counts)) if betray_counts else 0.0
-        betray_count_std = (
-            float(np.std(betray_counts, ddof=1)) if len(betray_counts) > 1 else 0.0
-        )
-        delta_mean = blocks_mean - baseline_blocks
-        ratio_mean = blocks_mean / baseline_blocks if baseline_blocks > EPS else 0.0
-
-        summary_rows.append(
-            {
-                "experiment_id": experiment_id,
-                "scenario_id": scenario_id,
-                "pool_id": pool_id,
-                "runs": len(runs),
-                "T": first.T,
-                "gamma": first.gamma,
-                "target_blocks": target_blocks,
-                "hashrate": hashrate,
-                "hashrates": json.dumps(first.hashrates, sort_keys=True),
-                "baseline_blocks": baseline_blocks,
-                "blocks_mean": blocks_mean,
-                "blocks_std": blocks_std,
-                "share_mean": share_mean,
-                "share_std": share_std,
-                "delta_mean": delta_mean,
-                "ratio_mean": ratio_mean,
-                "betray_count_mean": betray_count_mean,
-                "betray_count_std": betray_count_std,
-                "cartel_end_height_mean": (
-                    float(np.mean(end_heights)) if end_heights else ""
-                ),
-                "cartel_end_height_rate": len(end_heights) / len(runs),
-                "num_attacks_started_mean": float(
-                    np.mean([r.num_attacks_started for r in runs])
-                ),
-                "num_attacks_success_2blocks_mean": float(
-                    np.mean([r.num_attacks_success_2blocks for r in runs])
-                ),
-                "num_attacks_abort_mean": float(
-                    np.mean([r.num_attacks_abort for r in runs])
-                ),
-                "num_attacks_release_only_mean": float(
-                    np.mean([r.num_attacks_release_only for r in runs])
-                ),
-                "num_attacks_race_win_mean": float(
-                    np.mean([r.num_attacks_race_win for r in runs])
-                ),
-                "num_attacks_race_lose_mean": float(
-                    np.mean([r.num_attacks_race_lose for r in runs])
-                ),
-            }
-        )
-
-    return summary_rows
-
-
-def _float_token(value: float) -> str:
-    return f"{value:.3f}".rstrip("0").rstrip(".").replace(".", "p")
-
-
-def _hashrates_token(hashrates: Dict[str, float]) -> str:
-    parts = []
-    for pool_id in sorted(hashrates.keys()):
-        parts.append(f"{pool_id}{_float_token(float(hashrates[pool_id]))}")
-    return "_".join(parts)
-
-
-def plot_pool_scenarios(
-    output_path: Path,
     *,
-    summary_index: Dict[Tuple[str, str, str], Dict[str, Any]],
-    experiment_id: str,
-    pool_id: str,
-    scenarios: Sequence[str],
-    metric: str = "delta",
-    title: Optional[str] = None,
-) -> Optional[Path]:
-    if metric not in {"delta", "count"}:
-        raise ValueError("metric must be one of: delta, count")
-
-    labels = ["Baseline"]
-    values: List[float] = []
-    errors: List[float] = []
-
-    baseline_ref: Optional[float] = None
-    for scenario_id in scenarios:
-        row = summary_index.get((experiment_id, scenario_id, pool_id))
-        if row is None:
-            return None
-        if baseline_ref is None:
-            baseline_ref = float(row["baseline_blocks"])
-
-    if baseline_ref is None:
-        return None
-
-    if metric == "delta":
-        values.append(0.0)
-        errors.append(0.0)
+    sim_config: SimConfig,
+    experiment: str,
+    initial_members: Sequence[str],
+    traitor_id: str,
+) -> List[ScenarioConfig]:
+    if experiment == "three":
+        short_break_rule = "dissolve_immediate"
+        long_break_rule = "dissolve_threshold"
+    elif experiment == "four":
+        short_break_rule = "kick_immediate"
+        long_break_rule = "kick_threshold"
     else:
-        values.append(baseline_ref)
-        errors.append(0.0)
+        raise ValueError(f"Unknown experiment: {experiment}")
 
-    for scenario_id in scenarios:
-        row = summary_index[(experiment_id, scenario_id, pool_id)]
-        labels.append(scenario_id)
-        if metric == "delta":
-            values.append(float(row["delta_mean"]))
-            errors.append(float(row["blocks_std"]))
-        else:
-            values.append(float(row["blocks_mean"]))
-            errors.append(float(row["blocks_std"]))
-
-    try:
-        import matplotlib.pyplot as plt
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "matplotlib is required for --save-plots but is not available"
-        ) from exc
-
-    ensure_dir(output_path.parent)
-    fig, ax = plt.subplots(figsize=(8.0, 4.8))
-
-    x = np.arange(len(labels))
-    ax.errorbar(
-        x,
-        values,
-        yerr=errors,
-        fmt="-o",
-        color="#1b6ca8",
-        linewidth=2.0,
-        capsize=4,
-    )
-    ax.set_xticks(x, labels)
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
-    ax.set_ylabel("Delta blocks" if metric == "delta" else "Canonical blocks")
-    ax.set_xlabel("Scenario")
-    if title:
-        ax.set_title(title)
-    if metric == "delta":
-        ax.axhline(0.0, color="#444444", linewidth=1.0, alpha=0.8)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-    return output_path
-
-
-def generate_section5_plots(
-    *,
-    summary_rows: Sequence[Dict[str, Any]],
-    figures_dir: Path,
-    metric: str,
-    traitor_id: str,
-) -> List[Path]:
-    summary_index: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    for row in summary_rows:
-        key = (str(row["experiment_id"]), str(row["scenario_id"]), str(row["pool_id"]))
-        summary_index[key] = row
-
-    plot_specs: List[Tuple[str, str, Sequence[str], str]] = [
-        ("three_pools", "b", ("1.1", "1.2.1", "1.3"), "Three Pools - Pool b"),
-        ("three_pools", "s", ("1.1", "1.2.2", "1.3"), "Three Pools - Pool s"),
-        ("four_pools", "1", ("2.1", "2.2", "2.3"), "Four Pools - Pool 1"),
-        ("four_pools", "2", ("2.1", "2.2", "2.3"), "Four Pools - Pool 2"),
-        ("four_pools", "3", ("2.1", "2.2", "2.3"), "Four Pools - Pool 3"),
+    return [
+        ScenarioConfig(
+            name="AlwaysCartel",
+            mode="long",
+            initial_members=tuple(initial_members),
+            break_rule="none",
+            betray=BetrayConfig(
+                mode="none",
+                traitor_id=traitor_id,
+                betray_on_nth_opportunity=sim_config.betray_on_nth_opportunity,
+                betray_start_height=sim_config.betray_start_height,
+                q=sim_config.q,
+                betray_threshold=sim_config.betray_threshold,
+            ),
+        ),
+        ScenarioConfig(
+            name="BetrayBreakShort",
+            mode="long",
+            initial_members=tuple(initial_members),
+            break_rule=short_break_rule,
+            betray=BetrayConfig(
+                mode="short",
+                traitor_id=traitor_id,
+                betray_on_nth_opportunity=sim_config.betray_on_nth_opportunity,
+                betray_start_height=sim_config.betray_start_height,
+                q=sim_config.q,
+                betray_threshold=sim_config.betray_threshold,
+            ),
+        ),
+        ScenarioConfig(
+            name="BetrayThenBreak",
+            mode="long",
+            initial_members=tuple(initial_members),
+            break_rule=long_break_rule,
+            betray=BetrayConfig(
+                mode="prob",
+                traitor_id=traitor_id,
+                betray_on_nth_opportunity=sim_config.betray_on_nth_opportunity,
+                betray_start_height=sim_config.betray_start_height,
+                q=sim_config.q,
+                betray_threshold=sim_config.betray_threshold,
+            ),
+        ),
+        ScenarioConfig(
+            name="BetrayTolerated",
+            mode="long",
+            initial_members=tuple(initial_members),
+            break_rule="none",
+            betray=BetrayConfig(
+                mode="prob",
+                traitor_id=traitor_id,
+                betray_on_nth_opportunity=sim_config.betray_on_nth_opportunity,
+                betray_start_height=sim_config.betray_start_height,
+                q=sim_config.q,
+                betray_threshold=sim_config.betray_threshold,
+            ),
+        ),
     ]
 
-    created: List[Path] = []
-    for experiment_id, pool_id, scenarios, title in plot_specs:
-        reference_row = summary_index.get((experiment_id, scenarios[0], pool_id))
-        if reference_row is None:
-            continue
 
-        hashrates = json.loads(str(reference_row["hashrates"]))
-        gamma_token = _float_token(float(reference_row["gamma"]))
-        hashrates_token = _hashrates_token(hashrates)
-
-        filename = f"{experiment_id}_{pool_id}_{metric}_gamma{gamma_token}_{hashrates_token}"
-        if experiment_id == "four_pools":
-            filename += f"_traitor{traitor_id}"
-        output_path = figures_dir / f"{filename}.png"
-
-        saved = plot_pool_scenarios(
-            output_path,
-            summary_index=summary_index,
-            experiment_id=experiment_id,
-            pool_id=pool_id,
-            scenarios=scenarios,
-            metric=metric,
-            title=title,
-        )
-        if saved is not None:
-            created.append(saved)
-
-    return created
+def make_seed(seed_base: int, experiment: str, scenario: str, run_id: int) -> int:
+    payload = f"{seed_base}:{experiment}:{scenario}:{run_id}".encode("utf-8")
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:8], "big")
 
 
-def write_raw_csv(path: Path, raw_results: Sequence[RunResult]) -> None:
-    rows = [result.to_row() for result in raw_results]
-    if not rows:
-        return
-    write_csv(path, rows, list(rows[0].keys()))
-
-
-def write_summary_csv(path: Path, summary_rows: Sequence[Dict[str, Any]]) -> None:
-    rows = list(summary_rows)
-    if not rows:
-        return
-    write_csv(path, rows, list(rows[0].keys()))
-
-
-def save_params_json(
-    path: Path,
-    *,
-    config: SimConfig,
-    betray_config: BetrayConfig,
-    three_hashrates: Dict[str, float],
-    four_hashrates: Dict[str, float],
-    traitor_id: str,
+def write_rows_csv(
+    path: Path, rows: Sequence[Dict[str, Any]], fieldnames: Sequence[str]
 ) -> None:
-    ensure_dir(path.parent)
-    payload = {
-        "config": {
-            "T": config.T,
-            "gamma": config.gamma,
-            "target_blocks": config.target_blocks,
-            "runs": config.runs,
-            "base_seed": config.base_seed,
-            "results_dir": str(config.results_dir),
-            "figures_dir": str(config.figures_dir),
-        },
-        "betray_config": {
-            "q": betray_config.q,
-            "betray_start_height": betray_config.betray_start_height,
-            "betray_threshold": betray_config.betray_threshold,
-            "one_shot_betray": betray_config.one_shot_betray,
-            "one_shot_height": betray_config.one_shot_height,
-        },
-        "three_hashrates": three_hashrates,
-        "four_hashrates": four_hashrates,
-        "traitor_id": traitor_id,
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(fieldnames))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
-def write_event_log(path: Path, event_log: Sequence[Dict[str, Any]]) -> None:
-    rows = list(event_log)
-    if not rows:
+def summarize_results(
+    rows: Sequence[Dict[str, Any]],
+    pools: Sequence[PoolConfig],
+) -> List[Dict[str, Any]]:
+    summary: List[Dict[str, Any]] = []
+    pool_ids = [p.pool_id for p in pools]
+    pool_rates = {p.pool_id: p.hashrate for p in pools}
+
+    for pool_id in pool_ids:
+        row: Dict[str, Any] = {
+            "pool_id": pool_id,
+            "hashrate_p": pool_rates[pool_id],
+        }
+        for scenario_name in SCENARIO_ORDER:
+            values = [
+                float(item[f"share_pool_{pool_id}"])
+                for item in rows
+                if item["scenario"] == scenario_name
+            ]
+            row[f"{scenario_name}_share_mean"] = mean(values) if values else 0.0
+            row[f"{scenario_name}_share_std"] = (
+                stdev(values) if len(values) > 1 else 0.0
+            )
+        summary.append(row)
+
+    return summary
+
+
+def plot_summary(
+    summary_rows: Sequence[Dict[str, Any]],
+    output_png: Path,
+    output_pdf: Path,
+    title: str,
+) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except Exception:
+        print("[warn] matplotlib unavailable, skip plotting")
         return
-    fields = sorted({field for row in rows for field in row.keys()})
-    write_csv(path, rows, fields)
+
+    pool_ids = [str(row["pool_id"]) for row in summary_rows]
+    x = np.arange(len(pool_ids))
+
+    series = [
+        ("hashrate_p", "hashrate_p"),
+        ("AlwaysCartel_share_mean", "AlwaysCartel"),
+        ("BetrayBreakShort_share_mean", "BetrayBreakShort"),
+        ("BetrayThenBreak_share_mean", "BetrayThenBreak"),
+        ("BetrayTolerated_share_mean", "BetrayTolerated"),
+    ]
+
+    width = 0.16
+    fig, ax = plt.subplots(figsize=(12, 5.5))
+    for idx, (key, label) in enumerate(series):
+        values = [float(row[key]) for row in summary_rows]
+        offset = (idx - 2) * width
+        ax.bar(x + offset, values, width=width, label=label)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(pool_ids)
+    ax.set_xlabel("pool")
+    ax.set_ylabel("ratio")
+    ax.set_title(title)
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=180)
+    fig.savefig(output_pdf)
+    plt.close(fig)
 
 
-def run_all_experiments(
+def run_experiment(
     *,
-    config: SimConfig,
-    betray_config: BetrayConfig,
-    three_hashrates: Dict[str, float],
-    four_hashrates: Dict[str, float],
-    traitor_id: str,
-    save_sample_event_logs: bool,
-    save_plots: bool,
-    plot_metric: str,
-) -> Tuple[List[RunResult], List[Dict[str, Any]], List[Path]]:
-    validate_hashrates(three_hashrates)
-    validate_hashrates(four_hashrates)
-
-    scenarios = build_scenarios(three_hashrates, four_hashrates, traitor_id)
-    raw_results: List[RunResult] = []
+    experiment: str,
+    pools: Sequence[PoolConfig],
+    sim_config: SimConfig,
+    scenarios: Sequence[ScenarioConfig],
+    seed_base: int,
+    max_events: int,
+) -> List[RunResult]:
+    results: List[RunResult] = []
 
     for scenario in scenarios:
-        for run_id in range(config.runs):
-            seed = derive_seed(config.base_seed, scenario.scenario_id, run_id)
-            log_events = (
-                save_sample_event_logs
-                and run_id == 0
-                and scenario.scenario_id
-                in {
-                    "1.3",
-                    "2.3",
-                }
-            )
-            sim = Section5Simulation(
-                config=config,
+        for run_id in range(sim_config.runs):
+            seed = make_seed(seed_base, experiment, scenario.name, run_id)
+            # print(
+            # f"[{experiment}] scenario={scenario.name} run={run_id + 1}/{sim_config.runs} seed={seed}"
+            # )
+            sim = CollusionSimulation(
+                experiment=experiment,
+                sim_config=sim_config,
+                pools=pools,
                 scenario=scenario,
-                betray_config=betray_config,
-                seed=seed,
                 run_id=run_id,
-                log_events=log_events,
+                seed=seed,
+                max_events=max_events,
             )
-            run_result, event_log = sim.run()
-            raw_results.append(run_result)
+            result = sim.simulate_one_run()
 
-            if event_log:
-                write_event_log(
-                    config.results_dir
-                    / f"event_log_{scenario.scenario_id}_run{run_id}.csv",
-                    event_log,
-                )
+            if scenario.name == "BetrayBreakShort":
+                expected = sim_config.betray_on_nth_opportunity
+                if result.opportunity_at_betray != expected:
+                    raise RuntimeError(
+                        "Nth-opportunity sanity check failed: "
+                        f"opportunity_at_betray={result.opportunity_at_betray}, expected={expected}"
+                    )
+                # print(
+                # "  sanity: short betray at nth opportunity "
+                # f"({result.opportunity_at_betray})"
+                # )
 
-    summary_rows = summarize_runs(raw_results)
-    write_raw_csv(config.results_dir / "raw_runs.csv", raw_results)
-    write_summary_csv(config.results_dir / "summary.csv", summary_rows)
-    save_params_json(
-        config.results_dir / "scenario_params.json",
-        config=config,
-        betray_config=betray_config,
-        three_hashrates=three_hashrates,
-        four_hashrates=four_hashrates,
-        traitor_id=traitor_id,
+            results.append(result)
+
+    return results
+
+
+def rows_from_results(
+    results: Sequence[RunResult], pool_ids: Sequence[str]
+) -> List[Dict[str, Any]]:
+    return [result.to_row(pool_ids) for result in results]
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Cartel-TBW collusion simulation")
+    parser.add_argument("--T", type=float, default=10.0)
+    parser.add_argument("--gamma", type=float, default=0)
+    parser.add_argument("--runs", type=int, default=100)
+    parser.add_argument("--target-blocks-long", type=int, default=2016)
+
+    parser.add_argument("--betray-on-nth-opportunity", type=int, default=3)
+    parser.add_argument("--betray-start-height", type=int, default=20)
+    parser.add_argument("--q", type=float, default=0.7)
+    parser.add_argument("--betray-threshold", type=int, default=10)
+
+    parser.add_argument("--three-pools", type=str, default="b=0.4,s=0.25,h=0.35")
+    parser.add_argument("--three-traitor", type=str, default="s")
+    parser.add_argument("--four-pools", type=str, default="1=0.27,2=0.27,3=0.27,h=0.19")
+    parser.add_argument("--four-traitor", type=str, default="3")
+
+    parser.add_argument("--seed-base", type=int, default=20260224)
+    parser.add_argument("--max-events", type=int, default=2_000_000)
+    parser.add_argument("--output-dir", type=Path, default=Path("results/collusion"))
+    parser.add_argument("--skip-plots", action="store_true")
+    return parser
+
+
+def run_option_a_unit_tests() -> None:
+    assert CollusionSimulation.is_traitor_opportunity(
+        cartel_state="IDLE",
+        mined_height=11,
+        public_tip_height=10,
+        miner_is_traitor_and_member=True,
     )
-
-    created_plots: List[Path] = []
-    if save_plots:
-        created_plots = generate_section5_plots(
-            summary_rows=summary_rows,
-            figures_dir=config.figures_dir,
-            metric=plot_metric,
-            traitor_id=traitor_id,
-        )
-
-    return raw_results, summary_rows, created_plots
+    assert not CollusionSimulation.is_traitor_opportunity(
+        cartel_state="WITHHOLD",
+        mined_height=11,
+        public_tip_height=10,
+        miner_is_traitor_and_member=True,
+    )
+    assert not CollusionSimulation.is_traitor_opportunity(
+        cartel_state="IDLE",
+        mined_height=12,
+        public_tip_height=10,
+        miner_is_traitor_and_member=True,
+    )
+    assert not CollusionSimulation.is_traitor_opportunity(
+        cartel_state="IDLE",
+        mined_height=11,
+        public_tip_height=10,
+        miner_is_traitor_and_member=False,
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Section 5 Cartel-TBW simulation")
-    parser.add_argument("--T", type=float, default=10.0)
-    parser.add_argument("--gamma", type=float, default=0.1)
-    parser.add_argument("--target-blocks", type=int, default=2016)
-    parser.add_argument("--runs", type=int, default=10)
-    parser.add_argument("--base-seed", type=int, default=20260223)
-    parser.add_argument("--q", type=float, default=0.3)
-    parser.add_argument("--betray-start-height", type=int, default=200)
-    parser.add_argument("--betray-threshold", type=int, default=5)
-    parser.add_argument("--one-shot-height", type=int, default=None)
-    parser.add_argument("--traitor-id", choices=["1", "2", "3"], default="3")
-    parser.add_argument(
-        "--three-hashrates",
-        default="b=0.4,s=0.26,h=0.34",
-        help="comma-separated, e.g. b=0.4,s=0.26,h=0.34",
-    )
-    parser.add_argument(
-        "--four-hashrates",
-        default="1=0.27,2=0.27,3=0.27,h=0.19",
-        help="comma-separated, e.g. 1=0.27,2=0.27,3=0.27,h=0.19",
-    )
-    parser.add_argument("--results-dir", default="results_section5")
-    parser.add_argument("--figures-dir", default="figures_section5")
-    parser.add_argument("--save-sample-event-logs", action="store_true")
-    parser.add_argument("--save-plots", action="store_true")
-    parser.add_argument(
-        "--plot-metric",
-        choices=["delta", "count"],
-        default="delta",
-    )
-
+    parser = build_arg_parser()
     args = parser.parse_args()
 
-    config = SimConfig(
+    run_option_a_unit_tests()
+
+    three_pools = parse_pool_spec(args.three_pools)
+    four_pools = parse_pool_spec(args.four_pools)
+
+    sim_config = SimConfig(
         T=args.T,
         gamma=args.gamma,
-        target_blocks=args.target_blocks,
         runs=args.runs,
-        base_seed=args.base_seed,
-        results_dir=Path(args.results_dir),
-        figures_dir=Path(args.figures_dir),
-    )
-    betray_config = BetrayConfig(
-        q=args.q,
+        target_blocks_long=args.target_blocks_long,
+        betray_on_nth_opportunity=args.betray_on_nth_opportunity,
         betray_start_height=args.betray_start_height,
+        q=args.q,
         betray_threshold=args.betray_threshold,
-        one_shot_betray=True,
-        one_shot_height=args.one_shot_height,
     )
 
-    three_hashrates = parse_hashrates(args.three_hashrates, ["b", "s", "h"])
-    four_hashrates = parse_hashrates(args.four_hashrates, ["1", "2", "3", "h"])
-
-    raw_results, _, created_plots = run_all_experiments(
-        config=config,
-        betray_config=betray_config,
-        three_hashrates=three_hashrates,
-        four_hashrates=four_hashrates,
-        traitor_id=args.traitor_id,
-        save_sample_event_logs=args.save_sample_event_logs,
-        save_plots=args.save_plots,
-        plot_metric=args.plot_metric,
+    validate_inputs(
+        sim_config=sim_config,
+        three_pools=three_pools,
+        four_pools=four_pools,
+        three_traitor=args.three_traitor,
+        four_traitor=args.four_traitor,
     )
 
-    print("Section 5 simulation completed")
-    print(f"  runs_per_scenario = {config.runs}")
-    print(f"  total_run_rows = {len(raw_results)}")
-    print(f"  raw_csv = {config.results_dir / 'raw_runs.csv'}")
-    print(f"  summary_csv = {config.results_dir / 'summary.csv'}")
-    if args.save_plots:
-        print(f"  plot_metric = {args.plot_metric}")
-        print(f"  figures_dir = {config.figures_dir}")
-        print(f"  total_figures = {len(created_plots)}")
+    scenarios_three = build_scenarios(
+        sim_config=sim_config,
+        experiment="three",
+        initial_members=("b", "s"),
+        traitor_id=args.three_traitor,
+    )
+    scenarios_four = build_scenarios(
+        sim_config=sim_config,
+        experiment="four",
+        initial_members=("1", "2", "3"),
+        traitor_id=args.four_traitor,
+    )
+
+    results_three = run_experiment(
+        experiment="three",
+        pools=three_pools,
+        sim_config=sim_config,
+        scenarios=scenarios_three,
+        seed_base=args.seed_base,
+        max_events=args.max_events,
+    )
+    print("[three] experiment completed")
+
+    results_four = run_experiment(
+        experiment="four",
+        pools=four_pools,
+        sim_config=sim_config,
+        scenarios=scenarios_four,
+        seed_base=args.seed_base,
+        max_events=args.max_events,
+    )
+    print("[four] experiment completed")
+
+    output_dir: Path = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    three_pool_ids = [p.pool_id for p in three_pools]
+    four_pool_ids = [p.pool_id for p in four_pools]
+    all_pool_ids = sorted(set(three_pool_ids) | set(four_pool_ids))
+
+    three_rows = rows_from_results(results_three, three_pool_ids)
+    four_rows = rows_from_results(results_four, four_pool_ids)
+    all_rows = rows_from_results([*results_three, *results_four], all_pool_ids)
+
+    base_fields = [
+        "experiment",
+        "scenario",
+        "mode",
+        "traitor_id",
+        "run_id",
+        "seed",
+        "T",
+        "gamma",
+        "q",
+        "betray_start_height",
+        "betray_threshold",
+        "canonical_len",
+        "opportunity_count_traitor",
+        "betray_count",
+        "canon_len_at_betray",
+        "opportunity_at_betray",
+    ]
+
+    three_fields = (
+        base_fields
+        + [f"blocks_pool_{pid}" for pid in three_pool_ids]
+        + [f"share_pool_{pid}" for pid in three_pool_ids]
+    )
+    four_fields = (
+        base_fields
+        + [f"blocks_pool_{pid}" for pid in four_pool_ids]
+        + [f"share_pool_{pid}" for pid in four_pool_ids]
+    )
+    all_fields = (
+        base_fields
+        + [f"blocks_pool_{pid}" for pid in all_pool_ids]
+        + [f"share_pool_{pid}" for pid in all_pool_ids]
+    )
+
+    write_rows_csv(output_dir / "three" / "raw_runs.csv", three_rows, three_fields)
+    write_rows_csv(output_dir / "four" / "raw_runs.csv", four_rows, four_fields)
+    write_rows_csv(output_dir / "raw_runs.csv", all_rows, all_fields)
+
+    summary_three = summarize_results(three_rows, three_pools)
+    summary_four = summarize_results(four_rows, four_pools)
+
+    summary_fields = ["pool_id", "hashrate_p"]
+    for scenario_name in SCENARIO_ORDER:
+        summary_fields.append(f"{scenario_name}_share_mean")
+        summary_fields.append(f"{scenario_name}_share_std")
+
+    write_rows_csv(output_dir / "three" / "summary.csv", summary_three, summary_fields)
+    write_rows_csv(output_dir / "four" / "summary.csv", summary_four, summary_fields)
+
+    if args.skip_plots:
+        print("[info] --skip-plots enabled, skip png/pdf plotting")
+    else:
+        plot_summary(
+            summary_rows=summary_three,
+            output_png=output_dir / "cartel_three.png",
+            output_pdf=output_dir / "cartel_three.pdf",
+            title="Three-pool Cartel-TBW Simulation",
+        )
+        plot_summary(
+            summary_rows=summary_four,
+            output_png=output_dir / "cartel_four.png",
+            output_pdf=output_dir / "cartel_four.pdf",
+            title="Four-pool Cartel-TBW Simulation",
+        )
+
+    config_text = "\n".join(
+        [
+            f"T={sim_config.T}",
+            f"gamma={sim_config.gamma}",
+            f"runs={sim_config.runs}",
+            f"target_blocks_long={sim_config.target_blocks_long}",
+            f"betray_on_nth_opportunity={sim_config.betray_on_nth_opportunity}",
+            f"betray_start_height={sim_config.betray_start_height}",
+            f"q={sim_config.q}",
+            f"betray_threshold={sim_config.betray_threshold}",
+            f"three_pools={args.three_pools}",
+            f"three_traitor={args.three_traitor}",
+            f"four_pools={args.four_pools}",
+            f"four_traitor={args.four_traitor}",
+        ]
+    )
+    (output_dir / "experiment_config.txt").write_text(
+        config_text + "\n", encoding="utf-8"
+    )
+
+    print(f"All outputs saved to: {output_dir}")
 
 
 if __name__ == "__main__":
