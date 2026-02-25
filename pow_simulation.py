@@ -4,11 +4,10 @@ import argparse
 import csv
 import hashlib
 import math
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -22,6 +21,9 @@ def get_plt():  # pragma: no cover - plotting is optional at runtime
         return plt
     _PLOT_IMPORT_TRIED = True
     try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as _plt
     except Exception:
         plt = None
@@ -230,7 +232,9 @@ class TBWSimulation:
         self.canonical_tip_id = self._get_chain_tip_id()
         self.canonical_chain_ids = self._rebuild_canonical_chain(self.canonical_tip_id)
         if old_tip != self.canonical_tip_id:
-            self._log("reorg_or_tip_change", old_tip=old_tip, new_tip=self.canonical_tip_id)
+            self._log(
+                "reorg_or_tip_change", old_tip=old_tip, new_tip=self.canonical_tip_id
+            )
 
     def _publish_block(self, block: Block) -> None:
         self.blocks_by_id[block.id] = block
@@ -316,7 +320,9 @@ class TBWSimulation:
             )
             self._publish_block(bn_pub)
 
-            bn1_id = self._publish_new_block(parent_id=bn.id, miner="A", t_publish=self.t)
+            bn1_id = self._publish_new_block(
+                parent_id=bn.id, miner="A", t_publish=self.t
+            )
             self.counters.success_2blocks += 1
             self._log("mine_A_withhold_success", bn_id=bn.id, bn1_id=bn1_id)
             self._reset_attacker()
@@ -327,7 +333,9 @@ class TBWSimulation:
             if race_tip_id is None:
                 race_tip_id = self.canonical_tip_id
 
-            bnext_id = self._publish_new_block(parent_id=race_tip_id, miner="A", t_publish=self.t)
+            bnext_id = self._publish_new_block(
+                parent_id=race_tip_id, miner="A", t_publish=self.t
+            )
             self.counters.success_race += 1
             self._log("mine_A_race_success", block_id=bnext_id)
             self._reset_attacker()
@@ -341,9 +349,8 @@ class TBWSimulation:
         if self.attacker.state == "RACE" and self.attacker.base_height is not None:
             canonical_tip = self.blocks_by_id[self.canonical_tip_id]
             if canonical_tip.height >= self.attacker.base_height + 2:
-                if (
-                    self.attacker.race_tip_id is not None
-                    and not self._is_descendant(self.canonical_tip_id, self.attacker.race_tip_id)
+                if self.attacker.race_tip_id is not None and not self._is_descendant(
+                    self.canonical_tip_id, self.attacker.race_tip_id
                 ):
                     self._log("race_lost")
                     self._reset_attacker()
@@ -352,7 +359,10 @@ class TBWSimulation:
         if self.attacker.state != "WITHHOLD" or self.attacker.deadline is None:
             return
 
-        if self.blocks_by_id[self.canonical_tip_id].height >= (self.attacker.base_height or 0) + 2:
+        if (
+            self.blocks_by_id[self.canonical_tip_id].height
+            >= (self.attacker.base_height or 0) + 2
+        ):
             self.counters.abort += 1
             self._log("release_deadline_abort")
             self._reset_attacker()
@@ -399,7 +409,10 @@ class TBWSimulation:
         if not self.enable_daa:
             return
 
-        while len(self.canonical_chain_ids) >= (self.epochs_completed + 1) * self.epoch_len:
+        while (
+            len(self.canonical_chain_ids)
+            >= (self.epochs_completed + 1) * self.epoch_len
+        ):
             epoch_index = self.epochs_completed + 1
             boundary_len = epoch_index * self.epoch_len
             boundary_block_id = self.canonical_chain_ids[boundary_len - 1]
@@ -410,7 +423,9 @@ class TBWSimulation:
             d_new = d_old * (self.epoch_len * self.T) / t_total
             self.difficulty = d_new
 
-            segment = self.canonical_chain_ids[(epoch_index - 1) * self.epoch_len : boundary_len]
+            segment = self.canonical_chain_ids[
+                (epoch_index - 1) * self.epoch_len : boundary_len
+            ]
             a_blocks = sum(1 for bid in segment if self.blocks_by_id[bid].miner == "A")
             h_blocks = sum(1 for bid in segment if self.blocks_by_id[bid].miner == "H")
 
@@ -516,10 +531,18 @@ class TBWSimulation:
 
             t_a = self.t + self.rng.exponential(1.0 / lam_a)
             t_h = self.t + self.rng.exponential(1.0 / lam_h)
-            t_r = self.attacker.deadline if self.attacker.deadline is not None else float("inf")
+            t_r = (
+                self.attacker.deadline
+                if self.attacker.deadline is not None
+                else float("inf")
+            )
 
             t_next = min(t_a, t_h, t_r)
-            if self.mode == "by_time" and self.t_end is not None and t_next > self.t_end:
+            if (
+                self.mode == "by_time"
+                and self.t_end is not None
+                and t_next > self.t_end
+            ):
                 self.t = self.t_end
                 break
 
@@ -538,7 +561,9 @@ class TBWSimulation:
         return self._summarize(), self.epoch_stats, self.event_log
 
 
-def derive_seed(base_seed: int, scenario: str, p: float, run_id: int, n_value: Optional[int]) -> int:
+def derive_seed(
+    base_seed: int, scenario: str, p: float, run_id: int, n_value: Optional[int]
+) -> int:
     token = f"{base_seed}|{scenario}|{p:.8f}|{run_id}|{n_value if n_value is not None else 'NA'}"
     digest = hashlib.sha256(token.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
@@ -565,6 +590,12 @@ def aggregate_metric(values: List[float]) -> tuple[float, float]:
     return mean(values), stdev(values)
 
 
+def theoretical_orphan_rate(p: float) -> float:
+    if p <= 0.0:
+        return 0.0
+    return 0.5 * (1 - p) * (1.0 - (2.0 * (1.0 - p)) ** (1.0 / p))
+
+
 def scenario1(
     *,
     T: float,
@@ -584,7 +615,9 @@ def scenario1(
     for p in p_values:
         for run_id in range(runs):
             seed = derive_seed(base_seed, scenario_name, p, run_id, None)
-            log_events = save_sample_event_log and (abs(p - 0.60) < 1e-9) and run_id == 0
+            log_events = (
+                save_sample_event_log and (abs(p - 0.60) < 1e-9) and run_id == 0
+            )
             sim = TBWSimulation(
                 T=T,
                 p=p,
@@ -613,20 +646,39 @@ def scenario1(
 
     summary_rows: List[Dict[str, Any]] = []
     for p in p_values:
-        values = [r.A_share for r in raw_results if abs(r.p - p) < 1e-12]
+        p_rows = [r for r in raw_results if abs(r.p - p) < 1e-12]
+        values = [r.A_share for r in p_rows]
+        orphan_totals = [r.A_orphan_published + r.H_orphan_published for r in p_rows]
         m, s = aggregate_metric(values)
-        summary_rows.append({
-            "p": p,
-            "metric": "A_share",
-            "metric_mean": m,
-            "metric_std": s,
-            "runs": runs,
-        })
+        orphan_sum_mean = mean(orphan_totals) if orphan_totals else 0.0
+        denominator = float(runs * epoch_len) if runs > 0 and epoch_len > 0 else 1.0
+        orphan_rate_sim = float(sum(orphan_totals)) / denominator
+        summary_rows.append(
+            {
+                "p": p,
+                "metric": "A_share",
+                "metric_mean": m,
+                "metric_std": s,
+                "runs": runs,
+                "orphan_sum_mean": orphan_sum_mean,
+                "orphan_rate_sim": orphan_rate_sim,
+                "orphan_rate_formula": theoretical_orphan_rate(p),
+            }
+        )
 
     write_csv(
         out_dir / "summary.csv",
         summary_rows,
-        ["p", "metric", "metric_mean", "metric_std", "runs"],
+        [
+            "p",
+            "metric",
+            "metric_mean",
+            "metric_std",
+            "runs",
+            "orphan_sum_mean",
+            "orphan_rate_sim",
+            "orphan_rate_formula",
+        ],
     )
     return raw_results, summary_rows
 
@@ -674,15 +726,21 @@ def scenario2(
     summary_rows: List[Dict[str, Any]] = []
     baseline_blocks = float(epoch_len)
     for p in p_values:
-        values = [r.A_blocks_canonical - p * baseline_blocks for r in raw_results if abs(r.p - p) < 1e-12]
+        values = [
+            r.A_blocks_canonical - p * baseline_blocks
+            for r in raw_results
+            if abs(r.p - p) < 1e-12
+        ]
         m, s = aggregate_metric(values)
-        summary_rows.append({
-            "p": p,
-            "metric": "A_blocks_canonical_minus_p_times_2016",
-            "metric_mean": m,
-            "metric_std": s,
-            "runs": runs,
-        })
+        summary_rows.append(
+            {
+                "p": p,
+                "metric": "A_blocks_canonical_minus_p_times_2016",
+                "metric_mean": m,
+                "metric_std": s,
+                "runs": runs,
+            }
+        )
 
     write_csv(
         out_dir / "summary.csv",
@@ -700,8 +758,8 @@ def scenario3(
     base_seed: int,
     results_root: Path,
 ) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
-    p_values = [0.65, 0.70, 0.75, 0.80]
-    n_values = [2, 3, 5, 10]
+    p_values = [0.55, 0.65, 0.75, 0.85]
+    n_values = [1, 2, 3, 5]
     scenario_name = "scenario3_daa_by_time"
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
@@ -754,21 +812,25 @@ def scenario3(
         }
         for e in epoch_rows
     ]
-    epoch_fields = list(epoch_dict_rows[0].keys()) if epoch_dict_rows else [
-        "scenario",
-        "p",
-        "n",
-        "run_id",
-        "seed",
-        "epoch_index",
-        "t_start",
-        "t_end",
-        "t_total",
-        "difficulty_old",
-        "difficulty_new",
-        "a_blocks_canonical",
-        "h_blocks_canonical",
-    ]
+    epoch_fields = (
+        list(epoch_dict_rows[0].keys())
+        if epoch_dict_rows
+        else [
+            "scenario",
+            "p",
+            "n",
+            "run_id",
+            "seed",
+            "epoch_index",
+            "t_start",
+            "t_end",
+            "t_total",
+            "difficulty_old",
+            "difficulty_new",
+            "a_blocks_canonical",
+            "h_blocks_canonical",
+        ]
+    )
     write_csv(out_dir / "epoch_stats.csv", epoch_dict_rows, epoch_fields)
 
     summary_rows: List[Dict[str, Any]] = []
@@ -912,6 +974,66 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     save_plot_data(fig_dir, "s1_relative_share", data_rows)
 
 
+def plot_scenario1_orphan_rate(
+    summary_rows: List[Dict[str, Any]], fig_dir: Path
+) -> None:
+    plt_mod = get_plt()
+    if plt_mod is None:
+        return
+    ensure_dir(fig_dir)
+    apply_plot_theme(plt_mod)
+
+    rows = sorted(summary_rows, key=lambda r: r["p"])
+    p_vals = np.array([row["p"] for row in rows], dtype=float)
+    orphan_rate_sim = np.array([row["orphan_rate_sim"] for row in rows], dtype=float)
+    orphan_rate_formula = np.array(
+        [row["orphan_rate_formula"] for row in rows], dtype=float
+    )
+
+    fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
+    ax.plot(
+        p_vals,
+        orphan_rate_sim,
+        "o-",
+        color="#155eef",
+        linewidth=2.2,
+        markerfacecolor="#ffffff",
+        markeredgewidth=1.6,
+        label="simulation orphan rate",
+        zorder=3,
+    )
+    ax.plot(
+        p_vals,
+        orphan_rate_formula,
+        "s--",
+        color="#0f766e",
+        linewidth=2.0,
+        markerfacecolor="#ffffff",
+        markeredgewidth=1.4,
+        label="I(p)",
+        zorder=2,
+    )
+    ax.set_xlabel("Attacker hashrate p")
+    ax.set_ylabel("orphan rate")
+    ax.set_title("Scenario 1: Orphan Rate vs p")
+    ax.legend(loc="upper left")
+    ax.margins(x=0.02)
+
+    fig.tight_layout()
+    save_figure_bundle(fig_dir, "s1_orphan_rate_vs_p", fig)
+    plt_mod.close(fig)
+
+    data_rows = [
+        {
+            "p": float(p_vals[i]),
+            "orphan_rate_sim": float(orphan_rate_sim[i]),
+            "orphan_rate_formula": float(orphan_rate_formula[i]),
+        }
+        for i in range(len(p_vals))
+    ]
+    save_plot_data(fig_dir, "s1_orphan_rate_vs_p", data_rows)
+
+
 def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     plt_mod = get_plt()
     if plt_mod is None:
@@ -948,7 +1070,9 @@ def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         interpolate=True,
         label="delta <= 0 region",
     )
-    ax.axhline(0.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 0")
+    ax.axhline(
+        0.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 0"
+    )
     ax.set_xlabel("Attacker hashrate p")
     ax.set_ylabel("mean(A_blocks_canonical - p*2016)")
     ax.set_title("Scenario 2: Absolute Gain Delta (No DAA, fixed time = 2016T)")
@@ -1017,7 +1141,9 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
                 }
             )
 
-    ax.axhline(1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1")
+    ax.axhline(
+        1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
+    )
     ax.set_xlabel("Time horizon multiplier n")
     ax.set_ylabel("mean( A_blocks_canonical / (p*n*2016) )")
     ax.set_title("Scenario 3: Long-Term Ratio with DAA")
@@ -1028,67 +1154,6 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     save_figure_bundle(fig_dir, "s3_longterm_ratio", fig)
     plt_mod.close(fig)
     save_plot_data(fig_dir, "s3_longterm_ratio", plot_data_rows)
-
-
-def plot_scenario3_difficulty(epoch_rows: List[EpochStat], fig_dir: Path) -> None:
-    plt_mod = get_plt()
-    if plt_mod is None or not epoch_rows:
-        return
-    ensure_dir(fig_dir)
-    apply_plot_theme(plt_mod)
-
-    max_n = max(e.n for e in epoch_rows)
-    filtered = [e for e in epoch_rows if e.n == max_n]
-    grouped: Dict[Tuple[float, int], List[float]] = defaultdict(list)
-    for row in filtered:
-        grouped[(row.p, row.epoch_index)].append(row.difficulty_new)
-
-    series_by_p: Dict[float, List[Tuple[int, float, float]]] = defaultdict(list)
-    for (p, epoch_index), values in grouped.items():
-        m, s = aggregate_metric(values)
-        series_by_p[p].append((epoch_index, m, s))
-
-    palette = ["#0f766e", "#155eef", "#b42318", "#7a5af8", "#dd6b20"]
-    fig, ax = plt_mod.subplots(figsize=(9.2, 5.4))
-    plot_rows: List[Dict[str, Any]] = []
-
-    for idx, p in enumerate(sorted(series_by_p.keys())):
-        seq = sorted(series_by_p[p], key=lambda x: x[0])
-        x = np.array([item[0] for item in seq], dtype=int)
-        y = np.array([item[1] for item in seq], dtype=float)
-        yerr = np.array([item[2] for item in seq], dtype=float)
-        color = palette[idx % len(palette)]
-        ax.errorbar(
-            x,
-            y,
-            yerr=yerr,
-            marker="o",
-            capsize=4,
-            linewidth=1.9,
-            color=color,
-            label=f"p={p:.2f}, n={max_n}",
-        )
-        for i in range(len(x)):
-            plot_rows.append(
-                {
-                    "p": p,
-                    "n": max_n,
-                    "epoch_index": int(x[i]),
-                    "difficulty_mean": float(y[i]),
-                    "difficulty_std": float(yerr[i]),
-                }
-            )
-
-    ax.set_xlabel("Epoch index")
-    ax.set_ylabel("Difficulty D")
-    ax.set_title("Scenario 3 (Supplement): DAA Difficulty Trajectory")
-    ax.legend(loc="best", ncols=2)
-    ax.margins(x=0.02)
-
-    fig.tight_layout()
-    save_figure_bundle(fig_dir, "s3_difficulty_epoch", fig)
-    plt_mod.close(fig)
-    save_plot_data(fig_dir, "s3_difficulty_epoch", plot_rows)
 
 
 def write_config_summary(
@@ -1132,13 +1197,23 @@ def parse_scenarios(raw: str) -> List[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="TBW PoW simulation runner")
-    parser.add_argument("--scenarios", default="all", help="all or comma-separated subset of 1,2,3")
+    parser.add_argument(
+        "--scenarios", default="all", help="all or comma-separated subset of 1,2,3"
+    )
     parser.add_argument("--T", type=float, default=10.0, help="Target block interval")
-    parser.add_argument("--runs", type=int, default=10, help="Independent runs per configuration")
-    parser.add_argument("--epoch-len", type=int, default=2016, help="Epoch length in canonical blocks")
+    parser.add_argument(
+        "--runs", type=int, default=100, help="Independent runs per configuration"
+    )
+    parser.add_argument(
+        "--epoch-len", type=int, default=2016, help="Epoch length in canonical blocks"
+    )
     parser.add_argument("--base-seed", type=int, default=20260221, help="Base seed")
-    parser.add_argument("--results-dir", default="results", help="Results output directory")
-    parser.add_argument("--figures-dir", default="figures", help="Figure output directory")
+    parser.add_argument(
+        "--results-dir", default="results", help="Results output directory"
+    )
+    parser.add_argument(
+        "--figures-dir", default="figures", help="Figure output directory"
+    )
     parser.add_argument("--skip-plots", action="store_true", help="Skip plotting")
     parser.add_argument(
         "--no-sample-event-log",
@@ -1161,15 +1236,15 @@ def main() -> None:
     )
 
     print("TBW simulation config summary")
-    print(f"  T={args.T}, runs={args.runs}, epoch_len={args.epoch_len}, base_seed={args.base_seed}")
+    print(
+        f"  T={args.T}, runs={args.runs}, epoch_len={args.epoch_len}, base_seed={args.base_seed}"
+    )
     print("  gamma=0, private lead<=1, Poisson mining, tie by earlier t_publish")
     print("  DAA formula: D_new = D_old * (2016*T) / T_total")
 
     s1_summary: List[Dict[str, Any]] = []
     s2_summary: List[Dict[str, Any]] = []
     s3_summary: List[Dict[str, Any]] = []
-    s3_epoch_rows: List[EpochStat] = []
-
     if "1" in scenarios:
         _, s1_summary = scenario1(
             T=args.T,
@@ -1192,7 +1267,7 @@ def main() -> None:
         print("Scenario 2 completed")
 
     if "3" in scenarios:
-        _, s3_epoch_rows, s3_summary = scenario3(
+        _, _, s3_summary = scenario3(
             T=args.T,
             runs=args.runs,
             epoch_len=args.epoch_len,
@@ -1207,11 +1282,11 @@ def main() -> None:
         else:
             if s1_summary:
                 plot_scenario1(s1_summary, figures_dir)
+                plot_scenario1_orphan_rate(s1_summary, figures_dir)
             if s2_summary:
                 plot_scenario2(s2_summary, figures_dir)
             if s3_summary:
                 plot_scenario3(s3_summary, figures_dir)
-                plot_scenario3_difficulty(s3_epoch_rows, figures_dir)
             print("Figures saved")
 
 

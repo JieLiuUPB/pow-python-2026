@@ -913,8 +913,15 @@ def plot_summary(
         ("BetrayTolerated_share_mean", "BetrayTolerated"),
     ]
 
-    width = 0.16
-    fig, ax = plt.subplots(figsize=(12, 5.5))
+    hashrates = [float(row["hashrate_p"]) for row in summary_rows]
+    if hashrates:
+        y_min = min(hashrates) - 0.05
+        y_max = max(hashrates) + 0.05
+    else:
+        y_min, y_max = 0.0, 1.0
+
+    width = 0.12
+    fig, ax = plt.subplots(figsize=(9, 5))
     for idx, (key, label) in enumerate(series):
         values = [float(row[key]) for row in summary_rows]
         offset = (idx - 2) * width
@@ -925,7 +932,7 @@ def plot_summary(
     ax.set_xlabel("pool")
     ax.set_ylabel("ratio")
     ax.set_title(title)
-    ax.set_ylim(0.0, 1.0)
+    ax.set_ylim(y_min, y_max)
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -999,9 +1006,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q", type=float, default=0.7)
     parser.add_argument("--betray-threshold", type=int, default=10)
 
-    parser.add_argument("--three-pools", type=str, default="b=0.4,s=0.25,h=0.35")
+    parser.add_argument("--three-pools", type=str, default="b=0.35,s=0.30,h=0.35")
     parser.add_argument("--three-traitor", type=str, default="s")
-    parser.add_argument("--four-pools", type=str, default="1=0.27,2=0.27,3=0.27,h=0.19")
+    parser.add_argument("--four-pools", type=str, default="1=0.20,2=0.20,3=0.20,h=0.4")
     parser.add_argument("--four-traitor", type=str, default="3")
 
     parser.add_argument("--seed-base", type=int, default=20260224)
