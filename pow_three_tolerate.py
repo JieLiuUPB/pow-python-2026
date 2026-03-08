@@ -5,6 +5,8 @@ import concurrent.futures
 import math
 from statistics import mean
 
+from tqdm import tqdm
+
 from pow_collusion import (
     BetrayConfig,
     Block,
@@ -38,69 +40,71 @@ class FastCollusionSimulation(CollusionSimulation):
         self.canonical_tip_id = self.get_canonical_tip()
         return block
 
-    def _build_progress_targets(self, step_percent: int) -> list[tuple[int, int]]:
-        total = self.sim_config.target_blocks_long
-        targets: list[tuple[int, int]] = []
-        for percent in range(step_percent, 101, step_percent):
-            height = max(1, math.ceil(total * percent / 100))
-            if targets and targets[-1][0] == height:
-                targets[-1] = (height, percent)
-                continue
-            targets.append((height, percent))
-        if targets and targets[-1][1] != 100:
-            targets.append((total, 100))
-        return targets
-
-    def _emit_progress(
-        self, next_idx: int, targets: list[tuple[int, int]], total: int
-    ) -> int:
-        current = self.canonical_height()
-        while next_idx < len(targets) and current >= targets[next_idx][0]:
-            _, percent = targets[next_idx]
-            print(
-                f"[run {self.run_id + 1}] progress: "
-                f"{percent}% ({current}/{total} canonical blocks)"
-            )
-            next_idx += 1
-        return next_idx
-
-    def simulate_one_run(self, progress_step_percent: int = 10) -> "RunResult":
+    def simulate_one_run(
+        self,
+        progress_step_percent: int = 10,
+        *,
+        use_tqdm: bool = False,
+    ) -> "RunResult":
         num_events = 0
-        targets = self._build_progress_targets(progress_step_percent)
-        next_progress_idx = 0
+        total = self.sim_config.target_blocks_long
+        refresh_blocks = max(1, math.ceil(total * progress_step_percent / 100))
+        last_height = self.canonical_height()
+        pending_update = 0
 
-        while not self._should_stop():
-            if num_events >= self.max_events:
-                raise RuntimeError(
-                    f"Exceeded max_events={self.max_events}, scenario={self.scenario.name}, run={self.run_id}"
-                )
-            num_events += 1
-
-            processes = self.build_mining_processes()
-            event = self.sample_next_event(processes)
-            self.t = event.t_event
-
-            if event.event_type == "RELEASE_CARTEL":
-                self.on_deadline()
-                next_progress_idx = self._emit_progress(
-                    next_progress_idx, targets, self.sim_config.target_blocks_long
-                )
-                continue
-            if event.mine_process is None:
-                raise RuntimeError("MINE event without process")
-
-            process = event.mine_process
-            if process.target_kind == "private":
-                self._on_private_mine(miner_id=process.pool_id)
-            else:
-                self._on_public_mine(
-                    miner_id=process.pool_id, target_tip_id=process.target_tip_id
-                )
-            next_progress_idx = self._emit_progress(
-                next_progress_idx, targets, self.sim_config.target_blocks_long
+        progress_bar = None
+        if use_tqdm:
+            progress_bar = tqdm(
+                total=total,
+                desc=f"run {self.run_id + 1}",
+                unit="blk",
+                dynamic_ncols=True,
             )
 
-        return self._summarize()
+        try:
+            while not self._should_stop():
+                if num_events >= self.max_events:
+                    raise RuntimeError(
+                        f"Exceeded max_events={self.max_events}, scenario={self.scenario.name}, run={self.run_id}"
+                    )
+                num_events += 1
+
+                processes = self.build_mining_processes()
+                event = self.sample_next_event(processes)
+                self.t = event.t_event
+
+                if event.event_type == "RELEASE_CARTEL":
+                    self.on_deadline()
+                else:
+                    if event.mine_process is None:
+                        raise RuntimeError("MINE event without process")
+
+                    process = event.mine_process
+                    if process.target_kind == "private":
+                        self._on_private_mine(miner_id=process.pool_id)
+                    else:
+                        self._on_public_mine(
+                            miner_id=process.pool_id, target_tip_id=process.target_tip_id
+                        )
+
+                current_height = self.canonical_height()
+                height_delta = max(0, current_height - last_height)
+                last_height = current_height
+                pending_update += height_delta
+
+                if progress_bar is not None and (
+                    pending_update >= refresh_blocks or current_height >= total
+                ):
+                    progress_bar.update(pending_update)
+                    pending_update = 0
+
+            if progress_bar is not None and pending_update > 0:
+                progress_bar.update(pending_update)
+
+            return self._summarize()
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -110,7 +114,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--T", type=float, default=10.0)
     parser.add_argument("--gamma", type=float, default=0.0)
     parser.add_argument("--runs", type=int, default=1)
-    parser.add_argument("--target-blocks-long", type=int, default=201600)
+    parser.add_argument("--target-blocks-long", type=int, default=2016000)
 
     parser.add_argument("--betray-on-nth-opportunity", type=int, default=1)
     parser.add_argument("--betray-start-height", type=int, default=1)
@@ -122,7 +126,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed-base", type=int, default=20260224)
     parser.add_argument("--max-events", type=int, default=20_000_000)
     parser.add_argument("--progress-step-percent", type=int, default=1)
-    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--jobs", type=int, default=30)
     return parser
 
 
@@ -180,6 +184,7 @@ def run_single(
     sim_config: SimConfig,
     three_pools: list[PoolConfig],
     scenario: ScenarioConfig,
+    use_tqdm: bool = False,
 ) -> "RunResult":
     seed = make_seed(args.seed_base, "three", scenario.name, run_id)
     sim = FastCollusionSimulation(
@@ -191,7 +196,10 @@ def run_single(
         seed=seed,
         max_events=args.max_events,
     )
-    return sim.simulate_one_run(progress_step_percent=args.progress_step_percent)
+    return sim.simulate_one_run(
+        progress_step_percent=args.progress_step_percent,
+        use_tqdm=use_tqdm,
+    )
 
 
 def main() -> None:
@@ -229,31 +237,67 @@ def main() -> None:
 
     pool_ids = [p.pool_id for p in three_pools]
     results = []
-    if args.jobs == 1:
+    effective_jobs = min(args.jobs, sim_config.runs)
+    if args.jobs > effective_jobs:
+        print(
+            "[info] parallelism is per run, "
+            f"so effective_jobs=min(jobs, runs)={effective_jobs}"
+        )
+
+    if effective_jobs <= 1:
+        if args.jobs > 1 and sim_config.runs <= 1:
+            print(
+                "[info] only one run was requested; "
+                "a single run is not split across multiple processes"
+            )
         for run_id in range(sim_config.runs):
-            result = run_single(run_id, args, sim_config, three_pools, scenario)
+            result = run_single(
+                run_id,
+                args,
+                sim_config,
+                three_pools,
+                scenario,
+                use_tqdm=True,
+            )
             results.append(result)
             print(
                 f"[run {run_id + 1}/{sim_config.runs}] done, "
                 f"canonical_len={result.canonical_len}"
             )
     else:
-        print(f"parallel mode enabled: jobs={args.jobs}")
-        with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as executor:
+        print(
+            f"parallel mode enabled: requested_jobs={args.jobs}, "
+            f"effective_jobs={effective_jobs}"
+        )
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=effective_jobs
+        ) as executor:
             futures = {
                 executor.submit(
-                    run_single, run_id, args, sim_config, three_pools, scenario
+                    run_single,
+                    run_id,
+                    args,
+                    sim_config,
+                    three_pools,
+                    scenario,
+                    False,
                 ): run_id
                 for run_id in range(sim_config.runs)
             }
-            for future in concurrent.futures.as_completed(futures):
-                run_id = futures[future]
-                result = future.result()
-                results.append(result)
-                print(
-                    f"[run {run_id + 1}/{sim_config.runs}] done, "
-                    f"canonical_len={result.canonical_len}"
-                )
+            with tqdm(
+                total=sim_config.runs,
+                desc="runs",
+                unit="run",
+                dynamic_ncols=True,
+            ) as progress_bar:
+                for future in concurrent.futures.as_completed(futures):
+                    run_id = futures[future]
+                    result = future.result()
+                    results.append(result)
+                    progress_bar.update(1)
+                    progress_bar.set_postfix_str(
+                        f"last_run={run_id + 1}, canonical_len={result.canonical_len}"
+                    )
 
     print(
         "BetrayTolerated（三矿池）收益率均值 "
