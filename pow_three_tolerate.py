@@ -34,10 +34,7 @@ class FastCollusionSimulation(CollusionSimulation):
             t_publish=t_block,
             is_public=True,
         )
-        self.blocks_by_id[block_id] = block
-        self.tips.add(block_id)
-        self.tips.discard(parent_id)
-        self.canonical_tip_id = self.get_canonical_tip()
+        self._register_public_block(parent_id, block)
         return block
 
     def simulate_one_run(

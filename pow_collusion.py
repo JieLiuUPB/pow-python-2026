@@ -232,6 +232,26 @@ class CollusionSimulation:
     def get_canonical_tip(self) -> int:
         return max(self.tips, key=self._canonical_key)
 
+    def _is_better_tip(self, candidate_id: int, current_id: int) -> bool:
+        return self._canonical_key(candidate_id) > self._canonical_key(current_id)
+
+    def _register_public_block(self, parent_id: int, block: Block) -> None:
+        self.blocks_by_id[block.id] = block
+        self.tips.add(block.id)
+        self.tips.discard(parent_id)
+        if self._is_better_tip(block.id, self.canonical_tip_id):
+            self.canonical_tip_id = block.id
+
+    def _clear_inactive_race_tips(self) -> None:
+        tracked_tip_ids = (
+            self.controller.race_cartel_tip_id,
+            self.controller.race_honest_tip_id,
+        )
+        self.controller.reset_round()
+        for tip_id in tracked_tip_ids:
+            if tip_id is not None and tip_id != self.canonical_tip_id:
+                self.tips.discard(tip_id)
+
     def reconstruct_chain(self, tip_id: Optional[int] = None) -> List[int]:
         node = self.canonical_tip_id if tip_id is None else tip_id
         chain: List[int] = []
@@ -332,12 +352,7 @@ class CollusionSimulation:
             t_publish=t_block,
             is_public=True,
         )
-        old_tip = self.canonical_tip_id
-        self.blocks_by_id[block_id] = block
-        self.tips.add(block_id)
-        self.tips.discard(parent_id)
-        self.canonical_tip_id = self.get_canonical_tip()
-        _ = self.get_new_canonical_blocks_since(old_tip, self.canonical_tip_id)
+        self._register_public_block(parent_id, block)
         return block
 
     def _select_honest_tip_for_race(self, cartel_tip_id: int) -> Optional[int]:
@@ -371,7 +386,7 @@ class CollusionSimulation:
             ):
                 tie_active = True
             else:
-                self.controller.reset_round()
+                self._clear_inactive_race_tips()
 
         for pool_id in self.pool_ids:
             rate = self.pool_rates[pool_id] / self.sim_config.T
@@ -480,10 +495,10 @@ class CollusionSimulation:
         cartel_tip_id = self.controller.race_cartel_tip_id
         honest_tip_id = self.controller.race_honest_tip_id
         if cartel_tip_id is not None and self.is_descendant(block.id, cartel_tip_id):
-            self.controller.reset_round()
+            self._clear_inactive_race_tips()
             return
         if honest_tip_id is not None and self.is_descendant(block.id, honest_tip_id):
-            self.controller.reset_round()
+            self._clear_inactive_race_tips()
 
     def break_cartel_dissolve(self) -> None:
         self.controller.members.clear()

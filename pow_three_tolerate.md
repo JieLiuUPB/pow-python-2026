@@ -7,7 +7,7 @@
 
 ## 2. 核心结构
 - `FastCollusionSimulation(CollusionSimulation)`：
-  - 覆盖 `_publish_public_block`，用于更快地直接发布公共区块。
+  - 覆盖 `_publish_public_block`，复用基类的增量主链更新逻辑，避免每次发布新区块都全量扫描 `tips`。
   - 覆盖 `simulate_one_run`，在单进程模式下使用 `tqdm` 显示单次 run 的 canonical block 进度。
 - `build_arg_parser()`：
   - 定义命令行参数，包括仿真参数、三矿池配置、随机种子、事件上限、进度输出粒度。
@@ -36,6 +36,8 @@
 5. 统计并打印 `b/s/h` 的平均收益率。
 
 补充：当 `--jobs > 1` 且 `runs > 1` 时，使用 `ProcessPoolExecutor` 按 run 维度并行执行，属于多核模式。单个 run 本身不会再拆分成多个进程。
+
+补充：race 结束后会清理失效的分叉 tip，避免 `tips` 集合随着仿真长度持续膨胀，导致后期越来越慢。
 
 ## 4. 进度输出机制
 - 参数：`--progress-step-percent`（默认 `1`）。
@@ -73,3 +75,4 @@
   - 新建本 Markdown 文档，作为快速理解与后续同步维护基准。
   - 调整并行 worker 数为 `min(jobs, runs)`，并在 `jobs > runs` 或 `runs=1` 时输出提示，减少无意义的进程池初始化。
   - 将进度展示改为 `tqdm`：单进程显示单 run 进度，多进程显示整体 runs 进度。
+  - 将公共区块发布改为增量更新 canonical tip，并在 race 结束后清理失效 tip，修复长时间运行时 `tips` 膨胀导致的持续变慢问题。
