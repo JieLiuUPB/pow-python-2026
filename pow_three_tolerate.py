@@ -81,7 +81,8 @@ class FastCollusionSimulation(CollusionSimulation):
                         self._on_private_mine(miner_id=process.pool_id)
                     else:
                         self._on_public_mine(
-                            miner_id=process.pool_id, target_tip_id=process.target_tip_id
+                            miner_id=process.pool_id,
+                            target_tip_id=process.target_tip_id,
                         )
 
                 current_height = self.canonical_height()
@@ -111,14 +112,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--T", type=float, default=10.0)
     parser.add_argument("--gamma", type=float, default=0.0)
     parser.add_argument("--runs", type=int, default=1)
-    parser.add_argument("--target-blocks-long", type=int, default=2016000)
+    parser.add_argument("--target-blocks-long", type=int, default=201600)
 
     parser.add_argument("--betray-on-nth-opportunity", type=int, default=1)
     parser.add_argument("--betray-start-height", type=int, default=1)
     parser.add_argument("--q", type=float, default=1.0)
     parser.add_argument("--betray-threshold", type=int, default=100)
 
-    parser.add_argument("--three-pools", type=str, default="b=0.37,s=0.33,h=0.3")
+    parser.add_argument("--three-pools", type=str, default="b=0.4,s=0.3,h=0.3")
     parser.add_argument("--three-traitor", type=str, default="s")
     parser.add_argument("--seed-base", type=int, default=20260224)
     parser.add_argument("--max-events", type=int, default=20_000_000)
