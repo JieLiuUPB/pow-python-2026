@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import hashlib
 import math
@@ -10,6 +11,7 @@ from statistics import mean, stdev
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+from tqdm import tqdm
 
 plt = None
 _PLOT_IMPORT_TRIED = False
@@ -210,12 +212,15 @@ class TBWSimulation:
         value = -(self.T * self.difficulty / self.p) * math.log(2.0 * (1.0 - self.p))
         return max(value, 0.0)
 
-    def _get_chain_tip_id(self) -> int:
-        def key_func(block_id: int) -> tuple[int, float, int]:
-            blk = self.blocks_by_id[block_id]
-            return (blk.height, -blk.t_publish, -blk.id)
+    def _canonical_key(self, block_id: int) -> tuple[int, float, int]:
+        blk = self.blocks_by_id[block_id]
+        return (blk.height, -blk.t_publish, -blk.id)
 
-        return max(self.tips, key=key_func)
+    def _is_better_tip(self, candidate_id: int, current_id: int) -> bool:
+        return self._canonical_key(candidate_id) > self._canonical_key(current_id)
+
+    def _get_chain_tip_id(self) -> int:
+        return max(self.tips, key=self._canonical_key)
 
     def _rebuild_canonical_chain(self, tip_id: Optional[int] = None) -> List[int]:
         tip = self.canonical_tip_id if tip_id is None else tip_id
@@ -227,14 +232,39 @@ class TBWSimulation:
         chain.reverse()
         return chain
 
-    def _refresh_canonical(self) -> None:
-        old_tip = self.canonical_tip_id
-        self.canonical_tip_id = self._get_chain_tip_id()
-        self.canonical_chain_ids = self._rebuild_canonical_chain(self.canonical_tip_id)
-        if old_tip != self.canonical_tip_id:
-            self._log(
-                "reorg_or_tip_change", old_tip=old_tip, new_tip=self.canonical_tip_id
-            )
+    def _refresh_canonical_chain(self, old_tip_id: int, new_tip_id: int) -> None:
+        if old_tip_id == new_tip_id:
+            return
+        if old_tip_id == 0 and not self.canonical_chain_ids:
+            self.canonical_chain_ids = self._rebuild_canonical_chain(new_tip_id)
+            return
+
+        old_ancestors: set[int] = set()
+        node: Optional[int] = old_tip_id
+        while node is not None:
+            old_ancestors.add(node)
+            node = self.blocks_by_id[node].parent_id
+
+        appended_path: List[int] = []
+        node = new_tip_id
+        while node is not None and node not in old_ancestors:
+            appended_path.append(node)
+            node = self.blocks_by_id[node].parent_id
+
+        common_ancestor = node
+        if common_ancestor is None:
+            self.canonical_chain_ids = self._rebuild_canonical_chain(new_tip_id)
+            return
+
+        while (
+            self.canonical_chain_ids and self.canonical_chain_ids[-1] != common_ancestor
+        ):
+            self.canonical_chain_ids.pop()
+
+        self.canonical_chain_ids.extend(reversed(appended_path))
+
+    def _prune_inactive_tips(self) -> None:
+        self.tips = {self.canonical_tip_id}
 
     def _publish_block(self, block: Block) -> None:
         self.blocks_by_id[block.id] = block
@@ -244,7 +274,13 @@ class TBWSimulation:
         if parent is not None and parent in self.tips:
             self.tips.remove(parent)
 
-        self._refresh_canonical()
+        old_tip = self.canonical_tip_id
+        if self._is_better_tip(block.id, self.canonical_tip_id):
+            self.canonical_tip_id = block.id
+            self._refresh_canonical_chain(old_tip, self.canonical_tip_id)
+            self._log(
+                "reorg_or_tip_change", old_tip=old_tip, new_tip=self.canonical_tip_id
+            )
         self._log(
             "publish",
             block_id=block.id,
@@ -277,6 +313,7 @@ class TBWSimulation:
 
     def _reset_attacker(self) -> None:
         self.attacker = AttackerState()
+        self._prune_inactive_tips()
 
     def _handle_mine_A(self) -> None:
         state = self.attacker.state
@@ -518,47 +555,115 @@ class TBWSimulation:
             n=self.n_value,
         )
 
-    def run(self) -> tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]:
+    def run(
+        self,
+        progress_step_percent: int = 10,
+        *,
+        use_tqdm: bool = False,
+        progress_desc: Optional[str] = None,
+    ) -> tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]:
         events = 0
+        progress_bar = None
+        last_progress_value = 0.0
 
-        while not self._terminated():
-            if self.max_events is not None and events >= self.max_events:
-                raise RuntimeError("Reached max_events before termination")
+        if use_tqdm:
+            if self.mode == "by_blocks":
+                if self.target_blocks is None:
+                    raise ValueError("target_blocks is required for by_blocks mode")
+                progress_total = float(self.target_blocks)
+                progress_unit = "blk"
+            elif self.mode == "by_time":
+                if self.t_end is None:
+                    raise ValueError("t_end is required for by_time mode")
+                progress_total = float(self.t_end)
+                progress_unit = "t"
+            else:
+                raise ValueError(f"Unknown mode: {self.mode}")
 
-            lam = 1.0 / (self.T * self.difficulty)
-            lam_a = self.p * lam
-            lam_h = (1.0 - self.p) * lam
-
-            t_a = self.t + self.rng.exponential(1.0 / lam_a)
-            t_h = self.t + self.rng.exponential(1.0 / lam_h)
-            t_r = (
-                self.attacker.deadline
-                if self.attacker.deadline is not None
-                else float("inf")
+            progress_bar = tqdm(
+                total=progress_total,
+                desc=progress_desc or f"{self.scenario}: run {self.run_id + 1}",
+                unit=progress_unit,
+                dynamic_ncols=True,
+                leave=False,
             )
 
-            t_next = min(t_a, t_h, t_r)
-            if (
-                self.mode == "by_time"
-                and self.t_end is not None
-                and t_next > self.t_end
-            ):
-                self.t = self.t_end
-                break
+        try:
+            while not self._terminated():
+                if self.max_events is not None and events >= self.max_events:
+                    raise RuntimeError("Reached max_events before termination")
 
-            self.t = t_next
-            if t_r <= t_a and t_r <= t_h:
-                self._handle_release_A()
-            elif t_a <= t_h:
-                self._handle_mine_A()
-            else:
-                self._handle_mine_H()
+                lam = 1.0 / (self.T * self.difficulty)
+                lam_a = self.p * lam
+                lam_h = (1.0 - self.p) * lam
 
-            self._check_abort_condition()
-            self._maybe_adjust_difficulty()
-            events += 1
+                t_a = self.t + self.rng.exponential(1.0 / lam_a)
+                t_h = self.t + self.rng.exponential(1.0 / lam_h)
+                t_r = (
+                    self.attacker.deadline
+                    if self.attacker.deadline is not None
+                    else float("inf")
+                )
 
-        return self._summarize(), self.epoch_stats, self.event_log
+                t_next = min(t_a, t_h, t_r)
+                if (
+                    self.mode == "by_time"
+                    and self.t_end is not None
+                    and t_next > self.t_end
+                ):
+                    self.t = self.t_end
+                    if progress_bar is not None:
+                        progress_bar.update(self.t_end - last_progress_value)
+                    break
+
+                self.t = t_next
+                if t_r <= t_a and t_r <= t_h:
+                    self._handle_release_A()
+                elif t_a <= t_h:
+                    self._handle_mine_A()
+                else:
+                    self._handle_mine_H()
+
+                self._check_abort_condition()
+                self._maybe_adjust_difficulty()
+                events += 1
+
+                if progress_bar is not None:
+                    if self.mode == "by_blocks":
+                        progress_value = float(len(self.canonical_chain_ids))
+                        refresh_amount = max(
+                            1.0,
+                            math.ceil(
+                                float(self.target_blocks or 1)
+                                * progress_step_percent
+                                / 100.0
+                            ),
+                        )
+                    else:
+                        progress_value = min(float(self.t), float(self.t_end or self.t))
+                        refresh_amount = max(
+                            1.0,
+                            (float(self.t_end or 1.0) * progress_step_percent) / 100.0,
+                        )
+
+                    delta = progress_value - last_progress_value
+                    if delta >= refresh_amount or self._terminated():
+                        progress_bar.update(delta)
+                        last_progress_value = progress_value
+
+            if progress_bar is not None:
+                final_value = (
+                    float(len(self.canonical_chain_ids))
+                    if self.mode == "by_blocks"
+                    else float(self.t)
+                )
+                if final_value > last_progress_value:
+                    progress_bar.update(final_value - last_progress_value)
+
+            return self._summarize(), self.epoch_stats, self.event_log
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
 
 def derive_seed(
@@ -596,12 +701,169 @@ def theoretical_orphan_rate(p: float) -> float:
     return 0.5 * (1 - p) * (1.0 - (2.0 * (1.0 - p)) ** (1.0 / p))
 
 
+def theory_tbw(p: float) -> float:
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    term_1_minus_p = 1.0 - p
+    exponent = term_1_minus_p / p
+    base = 2.0 * term_1_minus_p
+    x = 2.0 * p * (term_1_minus_p * (base**exponent) + 1.0)
+    return p * x / (1 + p)
+
+
+def validate_positive_int(name: str, value: int) -> None:
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+
+
+@dataclass(frozen=True)
+class ScenarioTask:
+    scenario_name: str
+    p: float
+    run_id: int
+    n_value: Optional[int] = None
+    t_end: Optional[float] = None
+    target_blocks: Optional[int] = None
+    enable_daa: bool = False
+    log_events: bool = False
+
+
+def run_scenario_task(
+    *,
+    task: ScenarioTask,
+    T: float,
+    epoch_len: int,
+    base_seed: int,
+) -> tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]:
+    seed = derive_seed(
+        base_seed,
+        task.scenario_name,
+        task.p,
+        task.run_id,
+        task.n_value,
+    )
+    sim = TBWSimulation(
+        T=T,
+        p=task.p,
+        seed=seed,
+        mode="by_time" if task.t_end is not None else "by_blocks",
+        t_end=task.t_end,
+        target_blocks=task.target_blocks,
+        enable_daa=task.enable_daa,
+        epoch_len=epoch_len,
+        scenario=task.scenario_name,
+        run_id=task.run_id,
+        n_value=task.n_value,
+        log_events=task.log_events,
+    )
+    return sim.run()
+
+
+def execute_scenario_tasks(
+    *,
+    tasks: List[ScenarioTask],
+    T: float,
+    epoch_len: int,
+    base_seed: int,
+    jobs: int,
+    progress_desc: str,
+    postfix_builder: Any,
+) -> tuple[
+    List[RunResult],
+    List[EpochStat],
+    Dict[tuple[float, int, Optional[int]], List[Dict[str, Any]]],
+]:
+    raw_results: List[RunResult] = []
+    epoch_rows: List[EpochStat] = []
+    event_logs: Dict[tuple[float, int, Optional[int]], List[Dict[str, Any]]] = {}
+    effective_jobs = min(jobs, len(tasks))
+
+    if jobs > effective_jobs:
+        print(
+            "[info] parallelism is per run, "
+            f"so effective_jobs=min(jobs, tasks)={effective_jobs}"
+        )
+
+    if effective_jobs <= 1:
+        if jobs > 1 and len(tasks) <= 1:
+            print(
+                "[info] only one run was requested; "
+                "a single run is not split across multiple processes"
+            )
+        with tqdm(
+            total=len(tasks), desc=progress_desc, unit="run", dynamic_ncols=True
+        ) as progress_bar:
+            for task in tasks:
+                run_result, epochs, event_log = run_scenario_task(
+                    task=task,
+                    T=T,
+                    epoch_len=epoch_len,
+                    base_seed=base_seed,
+                )
+                raw_results.append(run_result)
+                epoch_rows.extend(epochs)
+                if event_log:
+                    event_logs[(task.p, task.run_id, task.n_value)] = event_log
+                progress_bar.update(1)
+                progress_bar.set_postfix_str(postfix_builder(task))
+    else:
+        print(
+            f"parallel mode enabled: requested_jobs={jobs}, "
+            f"effective_jobs={effective_jobs}"
+        )
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=effective_jobs
+        ) as executor:
+            futures = {
+                executor.submit(
+                    run_scenario_task,
+                    task=task,
+                    T=T,
+                    epoch_len=epoch_len,
+                    base_seed=base_seed,
+                ): task
+                for task in tasks
+            }
+            with tqdm(
+                total=len(tasks), desc=progress_desc, unit="run", dynamic_ncols=True
+            ) as progress_bar:
+                for future in concurrent.futures.as_completed(futures):
+                    task = futures[future]
+                    run_result, epochs, event_log = future.result()
+                    raw_results.append(run_result)
+                    epoch_rows.extend(epochs)
+                    if event_log:
+                        event_logs[(task.p, task.run_id, task.n_value)] = event_log
+                    progress_bar.update(1)
+                    progress_bar.set_postfix_str(postfix_builder(task))
+
+    raw_results.sort(
+        key=lambda r: (
+            float(r.p),
+            -1 if r.n is None else int(r.n),
+            int(r.run_id),
+        )
+    )
+    epoch_rows.sort(
+        key=lambda e: (
+            float(e.p),
+            int(e.n),
+            int(e.run_id),
+            int(e.epoch_index),
+        )
+    )
+    return raw_results, epoch_rows, event_logs
+
+
 def scenario1(
     *,
     T: float,
     runs: int,
     epoch_len: int,
     base_seed: int,
+    jobs: int,
     results_root: Path,
     save_sample_event_log: bool,
 ) -> tuple[List[RunResult], List[Dict[str, Any]]]:
@@ -610,35 +872,32 @@ def scenario1(
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
 
-    raw_results: List[RunResult] = []
+    tasks = [
+        ScenarioTask(
+            scenario_name=scenario_name,
+            p=p,
+            run_id=run_id,
+            target_blocks=epoch_len,
+            enable_daa=False,
+            log_events=save_sample_event_log and (abs(p - 0.60) < 1e-9) and run_id == 0,
+        )
+        for p in p_values
+        for run_id in range(runs)
+    ]
+    raw_results, _, event_logs = execute_scenario_tasks(
+        tasks=tasks,
+        T=T,
+        epoch_len=epoch_len,
+        base_seed=base_seed,
+        jobs=jobs,
+        progress_desc="scenario1",
+        postfix_builder=lambda task: f"p={task.p:.2f}, run={task.run_id + 1}/{runs}",
+    )
 
-    for p in p_values:
-        for run_id in range(runs):
-            seed = derive_seed(base_seed, scenario_name, p, run_id, None)
-            log_events = (
-                save_sample_event_log and (abs(p - 0.60) < 1e-9) and run_id == 0
-            )
-            sim = TBWSimulation(
-                T=T,
-                p=p,
-                seed=seed,
-                mode="by_blocks",
-                t_end=None,
-                target_blocks=epoch_len,
-                enable_daa=False,
-                epoch_len=epoch_len,
-                scenario=scenario_name,
-                run_id=run_id,
-                n_value=None,
-                log_events=log_events,
-            )
-            run_result, _, event_log = sim.run()
-            raw_results.append(run_result)
-
-            if event_log:
-                event_path = out_dir / f"event_log_p{p:.2f}_run{run_id}.csv"
-                fields = sorted({k for row in event_log for k in row.keys()})
-                write_csv(event_path, event_log, fields)
+    for (p, run_id, _), event_log in sorted(event_logs.items()):
+        event_path = out_dir / f"event_log_p{p:.2f}_run{run_id}.csv"
+        fields = sorted({k for row in event_log for k in row.keys()})
+        write_csv(event_path, event_log, fields)
 
     raw_rows = [r.to_dict() for r in raw_results]
     raw_fields = list(raw_rows[0].keys()) if raw_rows else []
@@ -649,10 +908,13 @@ def scenario1(
         p_rows = [r for r in raw_results if abs(r.p - p) < 1e-12]
         values = [r.A_share for r in p_rows]
         orphan_totals = [r.A_orphan_published + r.H_orphan_published for r in p_rows]
+        orphan_rates = [
+            float(total) / float(r.canonical_len if r.canonical_len > 0 else epoch_len)
+            for r, total in zip(p_rows, orphan_totals)
+        ]
         m, s = aggregate_metric(values)
+        orphan_rate_mean, orphan_rate_std = aggregate_metric(orphan_rates)
         orphan_sum_mean = mean(orphan_totals) if orphan_totals else 0.0
-        denominator = float(runs * epoch_len) if runs > 0 and epoch_len > 0 else 1.0
-        orphan_rate_sim = float(sum(orphan_totals)) / denominator
         summary_rows.append(
             {
                 "p": p,
@@ -661,7 +923,8 @@ def scenario1(
                 "metric_std": s,
                 "runs": runs,
                 "orphan_sum_mean": orphan_sum_mean,
-                "orphan_rate_sim": orphan_rate_sim,
+                "orphan_rate_sim": orphan_rate_mean,
+                "orphan_rate_std": orphan_rate_std,
                 "orphan_rate_formula": theoretical_orphan_rate(p),
             }
         )
@@ -677,6 +940,7 @@ def scenario1(
             "runs",
             "orphan_sum_mean",
             "orphan_rate_sim",
+            "orphan_rate_std",
             "orphan_rate_formula",
         ],
     )
@@ -689,6 +953,7 @@ def scenario2(
     runs: int,
     epoch_len: int,
     base_seed: int,
+    jobs: int,
     results_root: Path,
 ) -> tuple[List[RunResult], List[Dict[str, Any]]]:
     p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
@@ -697,27 +962,26 @@ def scenario2(
     ensure_dir(out_dir)
 
     t_end = epoch_len * T
-    raw_results: List[RunResult] = []
-
-    for p in p_values:
-        for run_id in range(runs):
-            seed = derive_seed(base_seed, scenario_name, p, run_id, None)
-            sim = TBWSimulation(
-                T=T,
-                p=p,
-                seed=seed,
-                mode="by_time",
-                t_end=t_end,
-                target_blocks=None,
-                enable_daa=False,
-                epoch_len=epoch_len,
-                scenario=scenario_name,
-                run_id=run_id,
-                n_value=None,
-                log_events=False,
-            )
-            run_result, _, _ = sim.run()
-            raw_results.append(run_result)
+    tasks = [
+        ScenarioTask(
+            scenario_name=scenario_name,
+            p=p,
+            run_id=run_id,
+            t_end=t_end,
+            enable_daa=False,
+        )
+        for p in p_values
+        for run_id in range(runs)
+    ]
+    raw_results, _, _ = execute_scenario_tasks(
+        tasks=tasks,
+        T=T,
+        epoch_len=epoch_len,
+        base_seed=base_seed,
+        jobs=jobs,
+        progress_desc="scenario2",
+        postfix_builder=lambda task: f"p={task.p:.2f}, run={task.run_id + 1}/{runs}",
+    )
 
     raw_rows = [r.to_dict() for r in raw_results]
     raw_fields = list(raw_rows[0].keys()) if raw_rows else []
@@ -756,6 +1020,7 @@ def scenario3(
     runs: int,
     epoch_len: int,
     base_seed: int,
+    jobs: int,
     results_root: Path,
 ) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
     p_values = [0.55, 0.65, 0.75, 0.85]
@@ -764,31 +1029,30 @@ def scenario3(
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
 
-    raw_results: List[RunResult] = []
-    epoch_rows: List[EpochStat] = []
-
-    for p in p_values:
-        for n_value in n_values:
-            t_end = n_value * epoch_len * T
-            for run_id in range(runs):
-                seed = derive_seed(base_seed, scenario_name, p, run_id, n_value)
-                sim = TBWSimulation(
-                    T=T,
-                    p=p,
-                    seed=seed,
-                    mode="by_time",
-                    t_end=t_end,
-                    target_blocks=None,
-                    enable_daa=True,
-                    epoch_len=epoch_len,
-                    scenario=scenario_name,
-                    run_id=run_id,
-                    n_value=n_value,
-                    log_events=False,
-                )
-                run_result, epochs, _ = sim.run()
-                raw_results.append(run_result)
-                epoch_rows.extend(epochs)
+    tasks = [
+        ScenarioTask(
+            scenario_name=scenario_name,
+            p=p,
+            run_id=run_id,
+            n_value=n_value,
+            t_end=n_value * epoch_len * T,
+            enable_daa=True,
+        )
+        for p in p_values
+        for n_value in n_values
+        for run_id in range(runs)
+    ]
+    raw_results, epoch_rows, _ = execute_scenario_tasks(
+        tasks=tasks,
+        T=T,
+        epoch_len=epoch_len,
+        base_seed=base_seed,
+        jobs=jobs,
+        progress_desc="scenario3",
+        postfix_builder=lambda task: (
+            f"p={task.p:.2f}, n={task.n_value}, run={task.run_id + 1}/{runs}"
+        ),
+    )
 
     raw_rows = [r.to_dict() for r in raw_results]
     raw_fields = list(raw_rows[0].keys()) if raw_rows else []
@@ -917,6 +1181,7 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     p_vals = np.array([row["p"] for row in rows], dtype=float)
     means = np.array([row["metric_mean"] for row in rows], dtype=float)
     stds = np.array([row["metric_std"] for row in rows], dtype=float)
+    theory_vals = np.array([theory_tbw(float(p)) for p in p_vals], dtype=float)
 
     fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
     ax.errorbar(
@@ -951,12 +1216,26 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         label="baseline y=x",
         zorder=1,
     )
+    ax.plot(
+        p_vals,
+        theory_vals,
+        linestyle="-.",
+        color="#e04f16",
+        linewidth=2.0,
+        label="TBW theory",
+        zorder=4,
+    )
     ax.set_xlabel("Attacker hashrate p")
     ax.set_ylabel("mean(A_share)")
     ax.set_title("Scenario 1: Relative Share (No DAA, canonical length = 2016)")
     ax.legend(loc="upper left")
     ax.margins(x=0.02)
-    ax.set_ylim(bottom=max(0.0, float(np.min(means - stds)) - 0.02))
+    ymin = min(float(np.min(means - stds)), float(np.min(theory_vals)))
+    ymax = max(float(np.max(means + stds)), float(np.max(theory_vals)))
+    ax.set_ylim(
+        bottom=max(0.0, ymin - 0.02),
+        top=min(1.02, ymax + 0.02),
+    )
 
     fig.tight_layout()
     save_figure_bundle(fig_dir, "s1_relative_share", fig)
@@ -968,6 +1247,7 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
             "metric_mean": float(means[i]),
             "metric_std": float(stds[i]),
             "baseline_y_equals_x": float(p_vals[i]),
+            "theory_tbw": float(theory_vals[i]),
         }
         for i in range(len(p_vals))
     ]
@@ -986,21 +1266,34 @@ def plot_scenario1_orphan_rate(
     rows = sorted(summary_rows, key=lambda r: r["p"])
     p_vals = np.array([row["p"] for row in rows], dtype=float)
     orphan_rate_sim = np.array([row["orphan_rate_sim"] for row in rows], dtype=float)
+    orphan_rate_std = np.array([row["orphan_rate_std"] for row in rows], dtype=float)
     orphan_rate_formula = np.array(
         [row["orphan_rate_formula"] for row in rows], dtype=float
     )
 
     fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
-    ax.plot(
+    ax.errorbar(
         p_vals,
         orphan_rate_sim,
-        "o-",
+        yerr=orphan_rate_std,
+        fmt="o-",
         color="#155eef",
+        ecolor="#8eb4ff",
         linewidth=2.2,
+        elinewidth=1.5,
+        capsize=4,
         markerfacecolor="#ffffff",
         markeredgewidth=1.6,
         label="simulation orphan rate",
         zorder=3,
+    )
+    ax.fill_between(
+        p_vals,
+        orphan_rate_sim - orphan_rate_std,
+        orphan_rate_sim + orphan_rate_std,
+        color="#155eef",
+        alpha=0.10,
+        zorder=2,
     )
     ax.plot(
         p_vals,
@@ -1027,6 +1320,7 @@ def plot_scenario1_orphan_rate(
         {
             "p": float(p_vals[i]),
             "orphan_rate_sim": float(orphan_rate_sim[i]),
+            "orphan_rate_std": float(orphan_rate_std[i]),
             "orphan_rate_formula": float(orphan_rate_formula[i]),
         }
         for i in range(len(p_vals))
@@ -1163,6 +1457,7 @@ def write_config_summary(
     runs: int,
     epoch_len: int,
     base_seed: int,
+    jobs: int,
 ) -> None:
     p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
     lines = [
@@ -1170,6 +1465,7 @@ def write_config_summary(
         "================================",
         f"T = {T}",
         f"runs = {runs}",
+        f"jobs = {jobs}",
         f"epoch_len = {epoch_len}",
         f"base_seed = {base_seed}",
         "gamma = 0",
@@ -1207,7 +1503,10 @@ def main() -> None:
     parser.add_argument(
         "--epoch-len", type=int, default=2016, help="Epoch length in canonical blocks"
     )
-    parser.add_argument("--base-seed", type=int, default=20260221, help="Base seed")
+    parser.add_argument(
+        "--jobs", type=int, default=25, help="Parallel worker processes across runs"
+    )
+    parser.add_argument("--base-seed", type=int, default=2026, help="Base seed")
     parser.add_argument(
         "--results-dir", default="results", help="Results output directory"
     )
@@ -1222,6 +1521,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    validate_positive_int("runs", args.runs)
+    validate_positive_int("jobs", args.jobs)
+    validate_positive_int("epoch_len", args.epoch_len)
 
     scenarios = parse_scenarios(args.scenarios)
     results_dir = Path(args.results_dir)
@@ -1233,11 +1535,12 @@ def main() -> None:
         runs=args.runs,
         epoch_len=args.epoch_len,
         base_seed=args.base_seed,
+        jobs=args.jobs,
     )
 
     print("TBW simulation config summary")
     print(
-        f"  T={args.T}, runs={args.runs}, epoch_len={args.epoch_len}, base_seed={args.base_seed}"
+        f"  T={args.T}, runs={args.runs}, jobs={args.jobs}, epoch_len={args.epoch_len}, base_seed={args.base_seed}"
     )
     print("  gamma=0, private lead<=1, Poisson mining, tie by earlier t_publish")
     print("  DAA formula: D_new = D_old * (2016*T) / T_total")
@@ -1251,6 +1554,7 @@ def main() -> None:
             runs=args.runs,
             epoch_len=args.epoch_len,
             base_seed=args.base_seed,
+            jobs=args.jobs,
             results_root=results_dir,
             save_sample_event_log=not args.no_sample_event_log,
         )
@@ -1262,6 +1566,7 @@ def main() -> None:
             runs=args.runs,
             epoch_len=args.epoch_len,
             base_seed=args.base_seed,
+            jobs=args.jobs,
             results_root=results_dir,
         )
         print("Scenario 2 completed")
@@ -1272,6 +1577,7 @@ def main() -> None:
             runs=args.runs,
             epoch_len=args.epoch_len,
             base_seed=args.base_seed,
+            jobs=args.jobs,
             results_root=results_dir,
         )
         print("Scenario 3 completed")
