@@ -30,14 +30,13 @@ except ModuleNotFoundError:  # pragma: no cover - optional at runtime
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 
-
 # Centralized defaults for easy modification.
-P_LIST = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
-GAMMA = 0.5
-N_REPEATS = 100
+P_LIST = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+GAMMA = 0.0
+N_REPEATS = 10
 TARGET_MAIN_CHAIN_BLOCKS = 2016
 BASE_SEED = 20260312
-JOBS = 1
+JOBS = 10
 RESULTS_DIR = Path("results/selfish")
 FIGURES_DIR = Path("figures/selfish")
 
@@ -154,7 +153,9 @@ def simulate_one_run(
     lead = 0
     in_race = False
 
-    while main_chain_blocks_selfish + main_chain_blocks_honest < target_main_chain_blocks:
+    while (
+        main_chain_blocks_selfish + main_chain_blocks_honest < target_main_chain_blocks
+    ):
         steps += 1
 
         if rand() < p:
