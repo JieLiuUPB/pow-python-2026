@@ -35,7 +35,7 @@ P_LIST = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
 GAMMA = 0.0
 N_REPEATS = 10
 TARGET_MAIN_CHAIN_BLOCKS = 2016
-BASE_SEED = 20260312
+BASE_SEED = 2026
 JOBS = 10
 RESULTS_DIR = Path("results/selfish")
 FIGURES_DIR = Path("figures/selfish")
@@ -54,6 +54,8 @@ class RunResult:
     honest_orphan_blocks: int
     lead_at_stop: int
     in_race_at_stop: bool
+    residual_lead_before_finalize: int
+    residual_race_before_finalize: bool
     steps: int
 
     @property
@@ -111,6 +113,8 @@ class RunResult:
             "honest_orphan_rate": self.honest_orphan_rate,
             "lead_at_stop": self.lead_at_stop,
             "in_race_at_stop": self.in_race_at_stop,
+            "residual_lead_before_finalize": self.residual_lead_before_finalize,
+            "residual_race_before_finalize": self.residual_race_before_finalize,
             "steps": self.steps,
         }
 
@@ -217,6 +221,35 @@ def simulate_one_run(
         honest_orphan_blocks += 1
         lead -= 1
 
+    residual_lead_before_finalize = lead
+    residual_race_before_finalize = in_race
+
+    # The target horizon is defined on finalized main-chain blocks, but the run
+    # may cross that horizon in the middle of an unfinished attack cycle. If we
+    # stop immediately, already mined withheld blocks are silently dropped from
+    # the accounting. We therefore settle the pending state after the horizon is
+    # crossed: first resolve a 0' race with one additional block, then publish
+    # any remaining hidden selfish lead.
+    if in_race:
+        steps += 1
+        if rand() < p:
+            main_chain_blocks_selfish += 2
+            honest_orphan_blocks += 1
+        else:
+            if rand() < gamma:
+                main_chain_blocks_selfish += 1
+                main_chain_blocks_honest += 1
+                honest_orphan_blocks += 1
+            else:
+                main_chain_blocks_honest += 2
+                selfish_orphan_blocks += 1
+        lead = 0
+        in_race = False
+
+    if lead > 0:
+        main_chain_blocks_selfish += lead
+        lead = 0
+
     return RunResult(
         p=p,
         gamma=gamma,
@@ -229,6 +262,8 @@ def simulate_one_run(
         honest_orphan_blocks=honest_orphan_blocks,
         lead_at_stop=lead,
         in_race_at_stop=in_race,
+        residual_lead_before_finalize=residual_lead_before_finalize,
+        residual_race_before_finalize=residual_race_before_finalize,
         steps=steps,
     )
 
@@ -304,6 +339,12 @@ def summarize_results(raw_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
                 "mean_total_orphans": _safe_mean(
                     [float(row["total_orphan_blocks"]) for row in rows]
                 ),
+                "mean_residual_lead_before_finalize": _safe_mean(
+                    [float(row["residual_lead_before_finalize"]) for row in rows]
+                ),
+                "race_fraction_before_finalize": _safe_mean(
+                    [float(bool(row["residual_race_before_finalize"])) for row in rows]
+                ),
                 "mean_steps": _safe_mean([float(row["steps"]) for row in rows]),
             }
         )
@@ -342,6 +383,27 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         ecolor="#8eb4ff",
         label="mean revenue_share",
     )
+    ax.fill_between(
+        p_values,
+        mean_revenue_share - se_revenue_share,
+        mean_revenue_share + se_revenue_share,
+        color="#155eef",
+        alpha=0.10,
+    )
+    ax.plot(
+        p_values,
+        mean_revenue_share + se_revenue_share,
+        color="#155eef",
+        linewidth=1.0,
+        alpha=0.45,
+    )
+    ax.plot(
+        p_values,
+        mean_revenue_share - se_revenue_share,
+        color="#155eef",
+        linewidth=1.0,
+        alpha=0.45,
+    )
     ax.plot(
         p_values,
         p_values,
@@ -368,6 +430,27 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         linewidth=2.0,
         color="#0f766e",
         ecolor="#7bd4ce",
+    )
+    ax.fill_between(
+        p_values,
+        mean_orphan_rate - se_orphan_rate,
+        mean_orphan_rate + se_orphan_rate,
+        color="#0f766e",
+        alpha=0.10,
+    )
+    ax.plot(
+        p_values,
+        mean_orphan_rate + se_orphan_rate,
+        color="#0f766e",
+        linewidth=1.0,
+        alpha=0.45,
+    )
+    ax.plot(
+        p_values,
+        mean_orphan_rate - se_orphan_rate,
+        color="#0f766e",
+        linewidth=1.0,
+        alpha=0.45,
     )
     ax.set_xlabel("Attacker hashrate p")
     ax.set_ylabel("Orphan rate")

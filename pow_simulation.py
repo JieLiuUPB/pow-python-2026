@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import hashlib
 import math
@@ -10,6 +11,11 @@ from statistics import mean, stdev
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:  # pragma: no cover - optional at runtime
+    tqdm = None
 
 plt = None
 _PLOT_IMPORT_TRIED = False
@@ -207,8 +213,7 @@ class TBWSimulation:
         return bid
 
     def _w_star(self) -> float:
-        value = -(self.T * self.difficulty / self.p) * math.log(2.0 * (1.0 - self.p))
-        return max(value, 0.0)
+        return 10.0 * self.T
 
     def _get_chain_tip_id(self) -> int:
         def key_func(block_id: int) -> tuple[int, float, int]:
@@ -591,9 +596,145 @@ def aggregate_metric(values: List[float]) -> tuple[float, float]:
 
 
 def theoretical_orphan_rate(p: float) -> float:
-    if p <= 0.0:
-        return 0.0
-    return 0.5 * (1 - p) * (1.0 - (2.0 * (1.0 - p)) ** (1.0 / p))
+    a = (4 - 2 * p) * (1 - p) * p**3
+    b = (1 + p) ** 2
+    return a / b
+
+
+def validate_jobs(jobs: int) -> None:
+    if jobs <= 0:
+        raise ValueError("jobs must be positive")
+
+
+def _run_tbw_task(
+    T: float,
+    p: float,
+    seed: int,
+    mode: str,
+    t_end: Optional[float],
+    target_blocks: Optional[int],
+    enable_daa: bool,
+    epoch_len: int,
+    scenario: str,
+    run_id: int,
+    n_value: Optional[int],
+    log_events: bool,
+    max_events: Optional[int],
+) -> tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]:
+    sim = TBWSimulation(
+        T=T,
+        p=p,
+        seed=seed,
+        mode=mode,
+        t_end=t_end,
+        target_blocks=target_blocks,
+        enable_daa=enable_daa,
+        epoch_len=epoch_len,
+        scenario=scenario,
+        run_id=run_id,
+        n_value=n_value,
+        log_events=log_events,
+        max_events=max_events,
+    )
+    return sim.run()
+
+
+def _collect_parallel_tbw_results(
+    tasks: Sequence[
+        tuple[
+            float,
+            float,
+            int,
+            str,
+            Optional[float],
+            Optional[int],
+            bool,
+            int,
+            str,
+            int,
+            Optional[int],
+            bool,
+            Optional[int],
+        ]
+    ],
+    *,
+    executor_cls: type[concurrent.futures.Executor],
+    max_workers: int,
+    show_progress: bool,
+    progress_desc: str,
+) -> List[tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]]:
+    results: List[tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]] = []
+    with executor_cls(max_workers=max_workers) as executor:
+        futures = [executor.submit(_run_tbw_task, *task) for task in tasks]
+        if tqdm is None or not show_progress:
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+        else:
+            with tqdm(
+                total=len(futures),
+                desc=progress_desc,
+                unit="run",
+                dynamic_ncols=True,
+            ) as progress_bar:
+                for future in concurrent.futures.as_completed(futures):
+                    results.append(future.result())
+                    progress_bar.update(1)
+    return results
+
+
+def _execute_tbw_tasks(
+    tasks: Sequence[
+        tuple[
+            float,
+            float,
+            int,
+            str,
+            Optional[float],
+            Optional[int],
+            bool,
+            int,
+            str,
+            int,
+            Optional[int],
+            bool,
+            Optional[int],
+        ]
+    ],
+    *,
+    jobs: int,
+    show_progress: bool,
+    progress_desc: str,
+) -> List[tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]]:
+    effective_jobs = min(jobs, len(tasks))
+    if jobs > effective_jobs:
+        print(
+            "[info] parallelism is per run, "
+            f"so effective_jobs=min(jobs, task_count)={effective_jobs}"
+        )
+
+    if effective_jobs <= 1:
+        return [_run_tbw_task(*task) for task in tasks]
+
+    try:
+        return _collect_parallel_tbw_results(
+            tasks,
+            executor_cls=concurrent.futures.ProcessPoolExecutor,
+            max_workers=effective_jobs,
+            show_progress=show_progress,
+            progress_desc=progress_desc,
+        )
+    except (PermissionError, OSError):
+        print(
+            "[warn] process-based parallelism is unavailable here; "
+            "falling back to ThreadPoolExecutor"
+        )
+        return _collect_parallel_tbw_results(
+            tasks,
+            executor_cls=concurrent.futures.ThreadPoolExecutor,
+            max_workers=effective_jobs,
+            show_progress=show_progress,
+            progress_desc=progress_desc,
+        )
 
 
 def scenario1(
@@ -604,41 +745,57 @@ def scenario1(
     base_seed: int,
     results_root: Path,
     save_sample_event_log: bool,
+    jobs: int,
+    show_progress: bool,
 ) -> tuple[List[RunResult], List[Dict[str, Any]]]:
     p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
     scenario_name = "scenario1_no_daa_by_blocks"
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
 
-    raw_results: List[RunResult] = []
-
+    tasks = []
     for p in p_values:
         for run_id in range(runs):
             seed = derive_seed(base_seed, scenario_name, p, run_id, None)
             log_events = (
                 save_sample_event_log and (abs(p - 0.60) < 1e-9) and run_id == 0
             )
-            sim = TBWSimulation(
-                T=T,
-                p=p,
-                seed=seed,
-                mode="by_blocks",
-                t_end=None,
-                target_blocks=epoch_len,
-                enable_daa=False,
-                epoch_len=epoch_len,
-                scenario=scenario_name,
-                run_id=run_id,
-                n_value=None,
-                log_events=log_events,
+            tasks.append(
+                (
+                    T,
+                    p,
+                    seed,
+                    "by_blocks",
+                    None,
+                    epoch_len,
+                    False,
+                    epoch_len,
+                    scenario_name,
+                    run_id,
+                    None,
+                    log_events,
+                    None,
+                )
             )
-            run_result, _, event_log = sim.run()
-            raw_results.append(run_result)
 
-            if event_log:
-                event_path = out_dir / f"event_log_p{p:.2f}_run{run_id}.csv"
-                fields = sorted({k for row in event_log for k in row.keys()})
-                write_csv(event_path, event_log, fields)
+    task_results = _execute_tbw_tasks(
+        tasks,
+        jobs=jobs,
+        show_progress=show_progress,
+        progress_desc="scenario1 runs",
+    )
+
+    raw_results: List[RunResult] = []
+    for run_result, _, event_log in task_results:
+        raw_results.append(run_result)
+        if event_log:
+            event_path = (
+                out_dir / f"event_log_p{run_result.p:.2f}_run{run_result.run_id}.csv"
+            )
+            fields = sorted({k for row in event_log for k in row.keys()})
+            write_csv(event_path, event_log, fields)
+
+    raw_results.sort(key=lambda r: (float(r.p), int(r.run_id)))
 
     raw_rows = [r.to_dict() for r in raw_results]
     raw_fields = list(raw_rows[0].keys()) if raw_rows else []
@@ -649,10 +806,12 @@ def scenario1(
         p_rows = [r for r in raw_results if abs(r.p - p) < 1e-12]
         values = [r.A_share for r in p_rows]
         orphan_totals = [r.A_orphan_published + r.H_orphan_published for r in p_rows]
+        orphan_rates = [
+            (total / epoch_len) if epoch_len > 0 else 0.0 for total in orphan_totals
+        ]
         m, s = aggregate_metric(values)
         orphan_sum_mean = mean(orphan_totals) if orphan_totals else 0.0
-        denominator = float(runs * epoch_len) if runs > 0 and epoch_len > 0 else 1.0
-        orphan_rate_sim = float(sum(orphan_totals)) / denominator
+        orphan_rate_mean, orphan_rate_std = aggregate_metric(orphan_rates)
         summary_rows.append(
             {
                 "p": p,
@@ -661,7 +820,8 @@ def scenario1(
                 "metric_std": s,
                 "runs": runs,
                 "orphan_sum_mean": orphan_sum_mean,
-                "orphan_rate_sim": orphan_rate_sim,
+                "orphan_rate_sim": orphan_rate_mean,
+                "orphan_rate_std": orphan_rate_std,
                 "orphan_rate_formula": theoretical_orphan_rate(p),
             }
         )
@@ -677,6 +837,7 @@ def scenario1(
             "runs",
             "orphan_sum_mean",
             "orphan_rate_sim",
+            "orphan_rate_std",
             "orphan_rate_formula",
         ],
     )
@@ -690,6 +851,8 @@ def scenario2(
     epoch_len: int,
     base_seed: int,
     results_root: Path,
+    jobs: int,
+    show_progress: bool,
 ) -> tuple[List[RunResult], List[Dict[str, Any]]]:
     p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
     scenario_name = "scenario2_no_daa_by_time"
@@ -697,27 +860,33 @@ def scenario2(
     ensure_dir(out_dir)
 
     t_end = epoch_len * T
-    raw_results: List[RunResult] = []
-
-    for p in p_values:
-        for run_id in range(runs):
-            seed = derive_seed(base_seed, scenario_name, p, run_id, None)
-            sim = TBWSimulation(
-                T=T,
-                p=p,
-                seed=seed,
-                mode="by_time",
-                t_end=t_end,
-                target_blocks=None,
-                enable_daa=False,
-                epoch_len=epoch_len,
-                scenario=scenario_name,
-                run_id=run_id,
-                n_value=None,
-                log_events=False,
-            )
-            run_result, _, _ = sim.run()
-            raw_results.append(run_result)
+    tasks = [
+        (
+            T,
+            p,
+            derive_seed(base_seed, scenario_name, p, run_id, None),
+            "by_time",
+            t_end,
+            None,
+            False,
+            epoch_len,
+            scenario_name,
+            run_id,
+            None,
+            False,
+            None,
+        )
+        for p in p_values
+        for run_id in range(runs)
+    ]
+    task_results = _execute_tbw_tasks(
+        tasks,
+        jobs=jobs,
+        show_progress=show_progress,
+        progress_desc="scenario2 runs",
+    )
+    raw_results = [run_result for run_result, _, _ in task_results]
+    raw_results.sort(key=lambda r: (float(r.p), int(r.run_id)))
 
     raw_rows = [r.to_dict() for r in raw_results]
     raw_fields = list(raw_rows[0].keys()) if raw_rows else []
@@ -757,6 +926,8 @@ def scenario3(
     epoch_len: int,
     base_seed: int,
     results_root: Path,
+    jobs: int,
+    show_progress: bool,
 ) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
     p_values = [0.55, 0.65, 0.75, 0.85]
     n_values = [1, 2, 3, 5]
@@ -764,31 +935,48 @@ def scenario3(
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
 
-    raw_results: List[RunResult] = []
-    epoch_rows: List[EpochStat] = []
-
+    tasks = []
     for p in p_values:
         for n_value in n_values:
             t_end = n_value * epoch_len * T
             for run_id in range(runs):
-                seed = derive_seed(base_seed, scenario_name, p, run_id, n_value)
-                sim = TBWSimulation(
-                    T=T,
-                    p=p,
-                    seed=seed,
-                    mode="by_time",
-                    t_end=t_end,
-                    target_blocks=None,
-                    enable_daa=True,
-                    epoch_len=epoch_len,
-                    scenario=scenario_name,
-                    run_id=run_id,
-                    n_value=n_value,
-                    log_events=False,
+                tasks.append(
+                    (
+                        T,
+                        p,
+                        derive_seed(base_seed, scenario_name, p, run_id, n_value),
+                        "by_time",
+                        t_end,
+                        None,
+                        True,
+                        epoch_len,
+                        scenario_name,
+                        run_id,
+                        n_value,
+                        False,
+                        None,
+                    )
                 )
-                run_result, epochs, _ = sim.run()
-                raw_results.append(run_result)
-                epoch_rows.extend(epochs)
+
+    task_results = _execute_tbw_tasks(
+        tasks,
+        jobs=jobs,
+        show_progress=show_progress,
+        progress_desc="scenario3 runs",
+    )
+
+    raw_results: List[RunResult] = []
+    epoch_rows: List[EpochStat] = []
+    for run_result, epochs, _ in task_results:
+        raw_results.append(run_result)
+        epoch_rows.extend(epochs)
+
+    raw_results.sort(
+        key=lambda r: (float(r.p), -1 if r.n is None else int(r.n), int(r.run_id))
+    )
+    epoch_rows.sort(
+        key=lambda e: (float(e.p), int(e.n), int(e.run_id), int(e.epoch_index))
+    )
 
     raw_rows = [r.to_dict() for r in raw_results]
     raw_fields = list(raw_rows[0].keys()) if raw_rows else []
@@ -917,6 +1105,11 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     p_vals = np.array([row["p"] for row in rows], dtype=float)
     means = np.array([row["metric_mean"] for row in rows], dtype=float)
     stds = np.array([row["metric_std"] for row in rows], dtype=float)
+    p_dense = np.linspace(
+        float(np.min(p_vals)), float(np.max(p_vals)), 400, dtype=float
+    )
+    theory_dense = 2.0 * p_dense * p_dense * (2.0 - p_dense) / (1.0 + p_dense)
+    theory_at_points = 2.0 * p_vals * p_vals * (2.0 - p_vals) / (1.0 + p_vals)
 
     fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
     ax.errorbar(
@@ -940,6 +1133,15 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         means + stds,
         color="#155eef",
         alpha=0.10,
+        zorder=2,
+    )
+    ax.plot(
+        p_dense,
+        theory_dense,
+        linestyle="--",
+        color="#0f766e",
+        linewidth=2.0,
+        label="theory",
         zorder=2,
     )
     ax.plot(
@@ -967,6 +1169,7 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
             "p": float(p_vals[i]),
             "metric_mean": float(means[i]),
             "metric_std": float(stds[i]),
+            "theory_relative_share": float(theory_at_points[i]),
             "baseline_y_equals_x": float(p_vals[i]),
         }
         for i in range(len(p_vals))
@@ -986,15 +1189,25 @@ def plot_scenario1_orphan_rate(
     rows = sorted(summary_rows, key=lambda r: r["p"])
     p_vals = np.array([row["p"] for row in rows], dtype=float)
     orphan_rate_sim = np.array([row["orphan_rate_sim"] for row in rows], dtype=float)
+    orphan_rate_std = np.array([row["orphan_rate_std"] for row in rows], dtype=float)
     orphan_rate_formula = np.array(
         [row["orphan_rate_formula"] for row in rows], dtype=float
     )
+    p_dense = np.linspace(
+        float(np.min(p_vals)), float(np.max(p_vals)), 400, dtype=float
+    )
+    orphan_rate_formula_dense = np.array(
+        [theoretical_orphan_rate(float(p)) for p in p_dense],
+        dtype=float,
+    )
 
     fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
-    ax.plot(
+    ax.errorbar(
         p_vals,
         orphan_rate_sim,
-        "o-",
+        yerr=orphan_rate_std,
+        fmt="o-",
+        capsize=4,
         color="#155eef",
         linewidth=2.2,
         markerfacecolor="#ffffff",
@@ -1002,14 +1215,36 @@ def plot_scenario1_orphan_rate(
         label="simulation orphan rate",
         zorder=3,
     )
+    ax.fill_between(
+        p_vals,
+        orphan_rate_sim - orphan_rate_std,
+        orphan_rate_sim + orphan_rate_std,
+        color="#155eef",
+        alpha=0.10,
+        zorder=2,
+    )
     ax.plot(
         p_vals,
-        orphan_rate_formula,
-        "s--",
+        orphan_rate_sim + orphan_rate_std,
+        color="#155eef",
+        linewidth=1.0,
+        alpha=0.45,
+        zorder=2,
+    )
+    ax.plot(
+        p_vals,
+        orphan_rate_sim - orphan_rate_std,
+        color="#155eef",
+        linewidth=1.0,
+        alpha=0.45,
+        zorder=2,
+    )
+    ax.plot(
+        p_dense,
+        orphan_rate_formula_dense,
+        linestyle="--",
         color="#0f766e",
         linewidth=2.0,
-        markerfacecolor="#ffffff",
-        markeredgewidth=1.4,
         label="I(p)",
         zorder=2,
     )
@@ -1027,6 +1262,7 @@ def plot_scenario1_orphan_rate(
         {
             "p": float(p_vals[i]),
             "orphan_rate_sim": float(orphan_rate_sim[i]),
+            "orphan_rate_std": float(orphan_rate_std[i]),
             "orphan_rate_formula": float(orphan_rate_formula[i]),
         }
         for i in range(len(p_vals))
@@ -1163,6 +1399,7 @@ def write_config_summary(
     runs: int,
     epoch_len: int,
     base_seed: int,
+    jobs: int,
 ) -> None:
     p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
     lines = [
@@ -1172,13 +1409,14 @@ def write_config_summary(
         f"runs = {runs}",
         f"epoch_len = {epoch_len}",
         f"base_seed = {base_seed}",
+        f"jobs = {jobs}",
         "gamma = 0",
         "DAA: D_new = D_old * (2016*T) / T_total",
-        "w*(p, D) = -(T*D/p) * ln(2*(1-p))",
-        "w* at D=1:",
+        "w*(p, D) = 10*T",
+        "w* values:",
     ]
     for p in p_values:
-        w_star = -(T / p) * math.log(2.0 * (1.0 - p))
+        w_star = 10.0 * T
         lines.append(f"  p={p:.2f}: w*={w_star:.6f}")
 
     ensure_dir(path.parent)
@@ -1207,7 +1445,8 @@ def main() -> None:
     parser.add_argument(
         "--epoch-len", type=int, default=2016, help="Epoch length in canonical blocks"
     )
-    parser.add_argument("--base-seed", type=int, default=20260221, help="Base seed")
+    parser.add_argument("--base-seed", type=int, default=2026, help="Base seed")
+    parser.add_argument("--jobs", type=int, default=30, help="Parallel workers")
     parser.add_argument(
         "--results-dir", default="results", help="Results output directory"
     )
@@ -1220,8 +1459,14 @@ def main() -> None:
         action="store_true",
         help="Do not save sample event log for scenario1 p=0.60 run0",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="disable tqdm progress display to reduce terminal overhead",
+    )
 
     args = parser.parse_args()
+    validate_jobs(args.jobs)
 
     scenarios = parse_scenarios(args.scenarios)
     results_dir = Path(args.results_dir)
@@ -1233,11 +1478,13 @@ def main() -> None:
         runs=args.runs,
         epoch_len=args.epoch_len,
         base_seed=args.base_seed,
+        jobs=args.jobs,
     )
 
     print("TBW simulation config summary")
     print(
-        f"  T={args.T}, runs={args.runs}, epoch_len={args.epoch_len}, base_seed={args.base_seed}"
+        f"  T={args.T}, runs={args.runs}, epoch_len={args.epoch_len}, "
+        f"base_seed={args.base_seed}, jobs={args.jobs}"
     )
     print("  gamma=0, private lead<=1, Poisson mining, tie by earlier t_publish")
     print("  DAA formula: D_new = D_old * (2016*T) / T_total")
@@ -1253,6 +1500,8 @@ def main() -> None:
             base_seed=args.base_seed,
             results_root=results_dir,
             save_sample_event_log=not args.no_sample_event_log,
+            jobs=args.jobs,
+            show_progress=not args.no_progress,
         )
         print("Scenario 1 completed")
 
@@ -1263,6 +1512,8 @@ def main() -> None:
             epoch_len=args.epoch_len,
             base_seed=args.base_seed,
             results_root=results_dir,
+            jobs=args.jobs,
+            show_progress=not args.no_progress,
         )
         print("Scenario 2 completed")
 
@@ -1273,6 +1524,8 @@ def main() -> None:
             epoch_len=args.epoch_len,
             base_seed=args.base_seed,
             results_root=results_dir,
+            jobs=args.jobs,
+            show_progress=not args.no_progress,
         )
         print("Scenario 3 completed")
 
