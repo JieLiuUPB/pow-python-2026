@@ -4,6 +4,7 @@
 
 1. 双矿工 TBW 攻击仿真
 2. 多矿池 cartel 合谋与背叛仿真
+3. 单攻击者 selfish mining 仿真
 
 ## 项目结构
 
@@ -38,6 +39,14 @@
 - 支持多进程并行
 - 支持进度条显示
 
+### `pow_selfish.py`
+
+单个 selfish miner 对其余 honest miners 的经典 Eyal-Sirer 自私挖矿仿真。
+
+- 支持扫描一组 `p`
+- 支持 `gamma` tie-breaking 参数
+- 输出终端表格、CSV 和 PNG 图
+
 ### `try.py`
 
 独立的公式试算和绘图脚本，不参与主仿真流程。
@@ -46,6 +55,7 @@
 
 - `pow_prompt.md`：双矿工 TBW 实验规格
 - `collusion.md`：cartel 合谋实验规格
+- `selfish.md`：selfish mining 实验规格
 - `pow_three_tolerate.md`：`pow_three_tolerate.py` 的维护说明
 
 ## 双矿工 TBW 仿真
