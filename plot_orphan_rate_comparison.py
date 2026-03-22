@@ -13,6 +13,7 @@ import matplotlib
 import numpy as np
 
 matplotlib.use("Agg", force=True)
+import scienceplots  # noqa: F401
 import matplotlib.pyplot as plt
 
 
@@ -153,7 +154,8 @@ def plot_series_with_std_band(
         elinewidth=1.5,
         color=color,
         ecolor=ecolor,
-        markerfacecolor="#ffffff",
+        markersize=3,
+        markerfacecolor="none",
         markeredgewidth=1.5,
         label=label,
         zorder=zorder,
@@ -172,8 +174,8 @@ def plot_series_with_std_band(
 
 def save_figure_bundle(base_path: Path, fig: plt.Figure) -> None:
     base_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(base_path.with_suffix(".png"), dpi=220, bbox_inches="tight")
-    fig.savefig(base_path.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(base_path.with_suffix(".png"), dpi=300, bbox_inches="tight")
+    fig.savefig(base_path.with_suffix(".pdf"), format="pdf", dpi=300, bbox_inches="tight")
 
 
 def plot_comparison(
@@ -182,9 +184,9 @@ def plot_comparison(
     output_path: Path,
     include_selfish_theory: bool,
 ) -> None:
-    plt.style.use("seaborn-v0_8-whitegrid")
+    plt.style.use(["science", "ieee"])
 
-    fig, ax = plt.subplots(figsize=(9.2, 5.6))
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
 
     tbw_p = np.array([row["p"] for row in tbw_rows], dtype=float)
     tbw_sim = np.array([row["sim_mean"] for row in tbw_rows], dtype=float)
@@ -247,10 +249,11 @@ def plot_comparison(
             zorder=2,
         )
 
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("Orphan rate")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("Orphan rate", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Orphan Rate Comparison")
-    ax.legend(loc="best")
+    ax.legend(loc="best", fontsize=10)
     ax.margins(x=0.02)
 
     all_values = [*tbw_sim, *tbw_theory_dense, *selfish_sim]
@@ -262,8 +265,10 @@ def plot_comparison(
         upper = max(all_values)
         ax.set_ylim(max(0.0, lower - 0.02), min(1.0, upper + 0.04))
 
+    ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     save_figure_bundle(output_path, fig)
+    plt.show()
     plt.close(fig)
 
 

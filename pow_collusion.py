@@ -993,10 +993,13 @@ def plot_summary(
         import matplotlib
 
         matplotlib.use("Agg", force=True)
+        import scienceplots  # noqa: F401
         import matplotlib.pyplot as plt
     except Exception:
         print("[warn] matplotlib unavailable, skip plotting")
         return
+
+    plt.style.use(["science", "ieee"])
 
     pool_ids = [str(row["pool_id"]) for row in summary_rows]
     x = np.arange(len(pool_ids))
@@ -1017,7 +1020,7 @@ def plot_summary(
         y_min, y_max = 0.0, 1.0
 
     width = 0.12
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
     for idx, (key, label) in enumerate(series):
         values = [float(row[key]) for row in summary_rows]
         offset = (idx - 2) * width
@@ -1025,17 +1028,19 @@ def plot_summary(
 
     ax.set_xticks(x)
     ax.set_xticklabels(pool_ids)
-    ax.set_xlabel("pool")
-    ax.set_ylabel("ratio")
+    ax.set_xlabel("pool", fontsize=12)
+    ax.set_ylabel("ratio", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title(title)
     ax.set_ylim(y_min, y_max)
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.legend(fontsize=10)
     fig.tight_layout()
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_png, dpi=180)
-    fig.savefig(output_pdf)
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
+    fig.savefig(output_pdf, format="pdf", dpi=300, bbox_inches="tight")
+    plt.show()
     plt.close(fig)
 
 

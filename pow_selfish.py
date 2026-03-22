@@ -28,6 +28,8 @@ except ModuleNotFoundError:  # pragma: no cover - optional at runtime
     tqdm = None
 
 matplotlib.use("Agg", force=True)
+import itertools
+import scienceplots  # noqa: F401
 import matplotlib.pyplot as plt
 
 # Centralized defaults for easy modification.
@@ -369,94 +371,64 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         [float(row["se_orphan_rate"]) for row in summary_rows], dtype=float
     )
 
-    plt.style.use("seaborn-v0_8-whitegrid")
+    plt.style.use(["science", "ieee"])
 
-    fig, ax = plt.subplots(figsize=(8.6, 5.2))
+    marker = itertools.cycle(("+", "+", "x", "s", "v", "o", "D", "^"))
+
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
     ax.errorbar(
         p_values,
         mean_revenue_share,
         yerr=se_revenue_share,
-        fmt="o-",
+        marker=next(marker),
         capsize=4,
         linewidth=2.0,
-        color="#155eef",
-        ecolor="#8eb4ff",
+        markersize=3,
+        markerfacecolor="none",
         label="mean revenue_share",
-    )
-    ax.fill_between(
-        p_values,
-        mean_revenue_share - se_revenue_share,
-        mean_revenue_share + se_revenue_share,
-        color="#155eef",
-        alpha=0.10,
-    )
-    ax.plot(
-        p_values,
-        mean_revenue_share + se_revenue_share,
-        color="#155eef",
-        linewidth=1.0,
-        alpha=0.45,
-    )
-    ax.plot(
-        p_values,
-        mean_revenue_share - se_revenue_share,
-        color="#155eef",
-        linewidth=1.0,
-        alpha=0.45,
     )
     ax.plot(
         p_values,
         p_values,
         linestyle="--",
         linewidth=1.8,
-        color="#344054",
+        marker=next(marker),
+        markersize=3,
+        markerfacecolor="none",
         label="y = x",
     )
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("Revenue share")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("Revenue share", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Selfish Mining: Revenue Share vs p")
-    ax.legend(loc="best")
+    ax.legend(loc="best", fontsize=10)
+    ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
-    fig.savefig(figures_dir / "revenue_share_vs_p.png", dpi=220, bbox_inches="tight")
+    fig.savefig(figures_dir / "revenue_share_vs_p.pdf", format="pdf", dpi=300)
+    plt.show()
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(8.6, 5.2))
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
     ax.errorbar(
         p_values,
         mean_orphan_rate,
         yerr=se_orphan_rate,
-        fmt="o-",
+        marker=next(marker),
         capsize=4,
         linewidth=2.0,
-        color="#0f766e",
-        ecolor="#7bd4ce",
+        markersize=3,
+        markerfacecolor="none",
+        label="mean orphan_rate",
     )
-    ax.fill_between(
-        p_values,
-        mean_orphan_rate - se_orphan_rate,
-        mean_orphan_rate + se_orphan_rate,
-        color="#0f766e",
-        alpha=0.10,
-    )
-    ax.plot(
-        p_values,
-        mean_orphan_rate + se_orphan_rate,
-        color="#0f766e",
-        linewidth=1.0,
-        alpha=0.45,
-    )
-    ax.plot(
-        p_values,
-        mean_orphan_rate - se_orphan_rate,
-        color="#0f766e",
-        linewidth=1.0,
-        alpha=0.45,
-    )
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("Orphan rate")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("Orphan rate", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Selfish Mining: Orphan Rate vs p")
+    ax.legend(loc="best", fontsize=10)
+    ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
-    fig.savefig(figures_dir / "orphan_rate_vs_p.png", dpi=220, bbox_inches="tight")
+    fig.savefig(figures_dir / "orphan_rate_vs_p.pdf", format="pdf", dpi=300)
+    plt.show()
     plt.close(fig)
 
 

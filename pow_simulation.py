@@ -31,6 +31,7 @@ def get_plt():  # pragma: no cover - plotting is optional at runtime
 
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as _plt
+        import scienceplots  # noqa: F401
     except Exception:
         plt = None
     else:
@@ -1051,36 +1052,15 @@ def scenario3(
 
 
 def apply_plot_theme(plt_mod: Any) -> None:
-    try:
-        plt_mod.style.use("seaborn-v0_8-whitegrid")
-    except Exception:
-        pass
-    plt_mod.rcParams.update(
-        {
-            "figure.facecolor": "#f4f7fb",
-            "axes.facecolor": "#fcfdff",
-            "axes.edgecolor": "#d7deea",
-            "axes.grid": True,
-            "grid.alpha": 0.25,
-            "grid.linestyle": "--",
-            "axes.titleweight": "bold",
-            "axes.labelweight": "semibold",
-            "font.size": 11,
-            "axes.titlesize": 13,
-            "axes.labelsize": 11,
-            "legend.frameon": True,
-            "legend.facecolor": "#ffffff",
-            "legend.edgecolor": "#d8dce6",
-        }
-    )
+    plt_mod.style.use(["science", "ieee"])
 
 
 def save_figure_bundle(fig_dir: Path, stem: str, fig: Any) -> None:
     ensure_dir(fig_dir)
     png_path = fig_dir / f"{stem}.png"
     pdf_path = fig_dir / f"{stem}.pdf"
-    fig.savefig(png_path, dpi=240, bbox_inches="tight")
-    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    fig.savefig(pdf_path, format="pdf", dpi=300, bbox_inches="tight")
 
 
 def save_plot_data(fig_dir: Path, stem: str, rows: Sequence[Dict[str, Any]]) -> None:
@@ -1111,7 +1091,7 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     theory_dense = 2.0 * p_dense * p_dense * (2.0 - p_dense) / (1.0 + p_dense)
     theory_at_points = 2.0 * p_vals * p_vals * (2.0 - p_vals) / (1.0 + p_vals)
 
-    fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
+    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
     ax.errorbar(
         p_vals,
         means,
@@ -1122,7 +1102,8 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         linewidth=2.2,
         elinewidth=1.5,
         capsize=4,
-        markerfacecolor="#ffffff",
+        markersize=3,
+        markerfacecolor="none",
         markeredgewidth=1.6,
         label="TBW simulation",
         zorder=3,
@@ -1153,15 +1134,18 @@ def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         label="baseline y=x",
         zorder=1,
     )
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("mean(A_share)")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("mean(A_share)", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Scenario 1: Relative Share (No DAA, canonical length = 2016)")
-    ax.legend(loc="upper left")
+    ax.legend(loc="upper left", fontsize=10)
     ax.margins(x=0.02)
     ax.set_ylim(bottom=max(0.0, float(np.min(means - stds)) - 0.02))
+    ax.grid(True, linestyle="--", alpha=0.6)
 
     fig.tight_layout()
     save_figure_bundle(fig_dir, "s1_relative_share", fig)
+    plt_mod.show()
     plt_mod.close(fig)
 
     data_rows = [
@@ -1201,7 +1185,7 @@ def plot_scenario1_orphan_rate(
         dtype=float,
     )
 
-    fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
+    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
     ax.errorbar(
         p_vals,
         orphan_rate_sim,
@@ -1210,7 +1194,8 @@ def plot_scenario1_orphan_rate(
         capsize=4,
         color="#155eef",
         linewidth=2.2,
-        markerfacecolor="#ffffff",
+        markersize=3,
+        markerfacecolor="none",
         markeredgewidth=1.6,
         label="simulation orphan rate",
         zorder=3,
@@ -1248,14 +1233,17 @@ def plot_scenario1_orphan_rate(
         label="I(p)",
         zorder=2,
     )
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("orphan rate")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("orphan rate", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Scenario 1: Orphan Rate vs p")
-    ax.legend(loc="upper left")
+    ax.legend(loc="upper left", fontsize=10)
     ax.margins(x=0.02)
+    ax.grid(True, linestyle="--", alpha=0.6)
 
     fig.tight_layout()
     save_figure_bundle(fig_dir, "s1_orphan_rate_vs_p", fig)
+    plt_mod.show()
     plt_mod.close(fig)
 
     data_rows = [
@@ -1282,7 +1270,7 @@ def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     means = np.array([row["metric_mean"] for row in rows], dtype=float)
     stds = np.array([row["metric_std"] for row in rows], dtype=float)
 
-    fig, ax = plt_mod.subplots(figsize=(8.8, 5.2))
+    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
     ax.errorbar(
         p_vals,
         means,
@@ -1293,7 +1281,8 @@ def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         linewidth=2.2,
         elinewidth=1.5,
         capsize=4,
-        markerfacecolor="#ffffff",
+        markersize=3,
+        markerfacecolor="none",
         markeredgewidth=1.6,
     )
     ax.fill_between(
@@ -1309,14 +1298,17 @@ def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     ax.axhline(
         0.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 0"
     )
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("mean(A_blocks_canonical - p*2016)")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("mean(A_blocks_canonical - p*2016)", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Scenario 2: Absolute Gain Delta (No DAA, fixed time = 2016T)")
-    ax.legend(loc="lower left")
+    ax.legend(loc="lower left", fontsize=10)
     ax.margins(x=0.02)
+    ax.grid(True, linestyle="--", alpha=0.6)
 
     fig.tight_layout()
     save_figure_bundle(fig_dir, "s2_absolute_delta", fig)
+    plt_mod.show()
     plt_mod.close(fig)
 
     data_rows = [
@@ -1338,7 +1330,7 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     ensure_dir(fig_dir)
     apply_plot_theme(plt_mod)
 
-    fig, ax = plt_mod.subplots(figsize=(9.2, 5.4))
+    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
     p_values = sorted({float(row["p"]) for row in summary_rows})
     palette = ["#155eef", "#0f766e", "#b42318", "#7a5af8", "#dd6b20"]
     plot_data_rows: List[Dict[str, Any]] = []
@@ -1361,7 +1353,8 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
             linewidth=2.0,
             elinewidth=1.4,
             color=color,
-            markerfacecolor="#ffffff",
+            markersize=3,
+            markerfacecolor="none",
             markeredgewidth=1.4,
             label=f"p={p:.2f}",
         )
@@ -1380,14 +1373,17 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
     ax.axhline(
         1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
     )
-    ax.set_xlabel("Time horizon multiplier n")
-    ax.set_ylabel("mean( A_blocks_canonical / (p*n*2016) )")
+    ax.set_xlabel("Time horizon multiplier n", fontsize=12)
+    ax.set_ylabel("mean( A_blocks_canonical / (p*n*2016) )", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Scenario 3: Long-Term Ratio with DAA")
-    ax.legend(loc="best", ncols=2)
+    ax.legend(loc="best", ncols=2, fontsize=10)
     ax.margins(x=0.03)
+    ax.grid(True, linestyle="--", alpha=0.6)
 
     fig.tight_layout()
     save_figure_bundle(fig_dir, "s3_longterm_ratio", fig)
+    plt_mod.show()
     plt_mod.close(fig)
     save_plot_data(fig_dir, "s3_longterm_ratio", plot_data_rows)
 
