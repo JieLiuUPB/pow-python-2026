@@ -111,20 +111,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--T", type=float, default=10.0)
     parser.add_argument("--gamma", type=float, default=0.0)
+<<<<<<< HEAD
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--target-blocks-long", type=int, default=201600)
+=======
+    parser.add_argument("--runs", type=int, default=10)
+    parser.add_argument("--target-blocks-long", type=int, default=2016)
+>>>>>>> 6aba88f0e551afe2d7d58038a646d2d5c460f83f
 
     parser.add_argument("--betray-on-nth-opportunity", type=int, default=1)
     parser.add_argument("--betray-start-height", type=int, default=1)
     parser.add_argument("--q", type=float, default=1.0)
     parser.add_argument("--betray-threshold", type=int, default=100)
 
+<<<<<<< HEAD
     parser.add_argument("--three-pools", type=str, default="b=0.4,s=0.3,h=0.3")
+=======
+    parser.add_argument("--three-pools", type=str, default="b=0.33,s=0.33,h=0.34")
+>>>>>>> 6aba88f0e551afe2d7d58038a646d2d5c460f83f
     parser.add_argument("--three-traitor", type=str, default="s")
     parser.add_argument("--seed-base", type=int, default=20260224)
     parser.add_argument("--max-events", type=int, default=20_000_000)
     parser.add_argument("--progress-step-percent", type=int, default=1)
-    parser.add_argument("--jobs", type=int, default=30)
+    parser.add_argument("--jobs", type=int, default=10)
     return parser
 
 

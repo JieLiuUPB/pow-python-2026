@@ -28,6 +28,8 @@ except ModuleNotFoundError:  # pragma: no cover - optional at runtime
     tqdm = None
 
 matplotlib.use("Agg", force=True)
+import itertools
+import scienceplots  # noqa: F401
 import matplotlib.pyplot as plt
 
 # Centralized defaults for easy modification.
@@ -35,7 +37,7 @@ P_LIST = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
 GAMMA = 0.0
 N_REPEATS = 10
 TARGET_MAIN_CHAIN_BLOCKS = 2016
-BASE_SEED = 20260312
+BASE_SEED = 2026
 JOBS = 10
 RESULTS_DIR = Path("results/selfish")
 FIGURES_DIR = Path("figures/selfish")
@@ -54,6 +56,8 @@ class RunResult:
     honest_orphan_blocks: int
     lead_at_stop: int
     in_race_at_stop: bool
+    residual_lead_before_finalize: int
+    residual_race_before_finalize: bool
     steps: int
 
     @property
@@ -111,6 +115,8 @@ class RunResult:
             "honest_orphan_rate": self.honest_orphan_rate,
             "lead_at_stop": self.lead_at_stop,
             "in_race_at_stop": self.in_race_at_stop,
+            "residual_lead_before_finalize": self.residual_lead_before_finalize,
+            "residual_race_before_finalize": self.residual_race_before_finalize,
             "steps": self.steps,
         }
 
@@ -217,6 +223,35 @@ def simulate_one_run(
         honest_orphan_blocks += 1
         lead -= 1
 
+    residual_lead_before_finalize = lead
+    residual_race_before_finalize = in_race
+
+    # The target horizon is defined on finalized main-chain blocks, but the run
+    # may cross that horizon in the middle of an unfinished attack cycle. If we
+    # stop immediately, already mined withheld blocks are silently dropped from
+    # the accounting. We therefore settle the pending state after the horizon is
+    # crossed: first resolve a 0' race with one additional block, then publish
+    # any remaining hidden selfish lead.
+    if in_race:
+        steps += 1
+        if rand() < p:
+            main_chain_blocks_selfish += 2
+            honest_orphan_blocks += 1
+        else:
+            if rand() < gamma:
+                main_chain_blocks_selfish += 1
+                main_chain_blocks_honest += 1
+                honest_orphan_blocks += 1
+            else:
+                main_chain_blocks_honest += 2
+                selfish_orphan_blocks += 1
+        lead = 0
+        in_race = False
+
+    if lead > 0:
+        main_chain_blocks_selfish += lead
+        lead = 0
+
     return RunResult(
         p=p,
         gamma=gamma,
@@ -229,6 +264,8 @@ def simulate_one_run(
         honest_orphan_blocks=honest_orphan_blocks,
         lead_at_stop=lead,
         in_race_at_stop=in_race,
+        residual_lead_before_finalize=residual_lead_before_finalize,
+        residual_race_before_finalize=residual_race_before_finalize,
         steps=steps,
     )
 
@@ -304,6 +341,12 @@ def summarize_results(raw_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
                 "mean_total_orphans": _safe_mean(
                     [float(row["total_orphan_blocks"]) for row in rows]
                 ),
+                "mean_residual_lead_before_finalize": _safe_mean(
+                    [float(row["residual_lead_before_finalize"]) for row in rows]
+                ),
+                "race_fraction_before_finalize": _safe_mean(
+                    [float(bool(row["residual_race_before_finalize"])) for row in rows]
+                ),
                 "mean_steps": _safe_mean([float(row["steps"]) for row in rows]),
             }
         )
@@ -328,18 +371,20 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         [float(row["se_orphan_rate"]) for row in summary_rows], dtype=float
     )
 
-    plt.style.use("seaborn-v0_8-whitegrid")
+    plt.style.use(["science", "ieee"])
 
-    fig, ax = plt.subplots(figsize=(8.6, 5.2))
+    marker = itertools.cycle(("+", "+", "x", "s", "v", "o", "D", "^"))
+
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
     ax.errorbar(
         p_values,
         mean_revenue_share,
         yerr=se_revenue_share,
-        fmt="o-",
+        marker=next(marker),
         capsize=4,
         linewidth=2.0,
-        color="#155eef",
-        ecolor="#8eb4ff",
+        markersize=3,
+        markerfacecolor="none",
         label="mean revenue_share",
     )
     ax.plot(
@@ -347,33 +392,43 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         p_values,
         linestyle="--",
         linewidth=1.8,
-        color="#344054",
+        marker=next(marker),
+        markersize=3,
+        markerfacecolor="none",
         label="y = x",
     )
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("Revenue share")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("Revenue share", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Selfish Mining: Revenue Share vs p")
-    ax.legend(loc="best")
+    ax.legend(loc="best", fontsize=10)
+    ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
-    fig.savefig(figures_dir / "revenue_share_vs_p.png", dpi=220, bbox_inches="tight")
+    fig.savefig(figures_dir / "revenue_share_vs_p.pdf", format="pdf", dpi=300)
+    plt.show()
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(8.6, 5.2))
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
     ax.errorbar(
         p_values,
         mean_orphan_rate,
         yerr=se_orphan_rate,
-        fmt="o-",
+        marker=next(marker),
         capsize=4,
         linewidth=2.0,
-        color="#0f766e",
-        ecolor="#7bd4ce",
+        markersize=3,
+        markerfacecolor="none",
+        label="mean orphan_rate",
     )
-    ax.set_xlabel("Attacker hashrate p")
-    ax.set_ylabel("Orphan rate")
+    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_ylabel("Orphan rate", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title("Selfish Mining: Orphan Rate vs p")
+    ax.legend(loc="best", fontsize=10)
+    ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
-    fig.savefig(figures_dir / "orphan_rate_vs_p.png", dpi=220, bbox_inches="tight")
+    fig.savefig(figures_dir / "orphan_rate_vs_p.pdf", format="pdf", dpi=300)
+    plt.show()
     plt.close(fig)
 
 

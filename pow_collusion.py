@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import hashlib
 import math
@@ -10,6 +11,11 @@ from statistics import mean, stdev
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:  # pragma: no cover - optional at runtime
+    tqdm = None
 
 SCENARIO_ORDER = [
     "AlwaysCartel",
@@ -331,12 +337,8 @@ class CollusionSimulation:
         return block_id
 
     def _w_star(self, p: float) -> float:
-        if p <= 0.0:
-            return 0.0
-        if p >= 1.0:
-            return self.sim_config.T
-        value = -(self.sim_config.T / p) * math.log(2.0 * (1.0 - p))
-        return max(value, 0.0)
+        _ = p
+        return 10.0 * self.sim_config.T
 
     def _publish_public_block(
         self, parent_id: int, miner_id: str, t_publish: Optional[float] = None
@@ -710,6 +712,95 @@ class CollusionSimulation:
         return self._summarize()
 
 
+class FastCollusionSimulation(CollusionSimulation):
+    def _publish_public_block(
+        self, parent_id: int, miner_id: str, t_publish: Optional[float] = None
+    ) -> Block:
+        t_block = self.t if t_publish is None else t_publish
+        block_id = self._new_public_id()
+        height = self.blocks_by_id[parent_id].height + 1
+        block = Block(
+            id=block_id,
+            parent_id=parent_id,
+            height=height,
+            miner_id=miner_id,
+            t_publish=t_block,
+            is_public=True,
+        )
+        self.blocks_by_id[block_id] = block
+        self.tips.add(block_id)
+        self.tips.discard(parent_id)
+        self.canonical_tip_id = self.get_canonical_tip()
+        return block
+
+    def simulate_one_run(
+        self,
+        progress_step_percent: int = 10,
+        *,
+        use_tqdm: bool = False,
+    ) -> RunResult:
+        num_events = 0
+        total = self.sim_config.target_blocks_long
+        refresh_blocks = max(1, math.ceil(total * progress_step_percent / 100))
+        last_height = self.canonical_height()
+        pending_update = 0
+
+        progress_bar = None
+        if use_tqdm and tqdm is not None:
+            progress_bar = tqdm(
+                total=total,
+                desc=f"run {self.run_id + 1}",
+                unit="blk",
+                dynamic_ncols=True,
+            )
+
+        try:
+            while not self._should_stop():
+                if num_events >= self.max_events:
+                    raise RuntimeError(
+                        f"Exceeded max_events={self.max_events}, scenario={self.scenario.name}, run={self.run_id}"
+                    )
+                num_events += 1
+
+                processes = self.build_mining_processes()
+                event = self.sample_next_event(processes)
+                self.t = event.t_event
+
+                if event.event_type == "RELEASE_CARTEL":
+                    self.on_deadline()
+                else:
+                    if event.mine_process is None:
+                        raise RuntimeError("MINE event without process")
+
+                    process = event.mine_process
+                    if process.target_kind == "private":
+                        self._on_private_mine(miner_id=process.pool_id)
+                    else:
+                        self._on_public_mine(
+                            miner_id=process.pool_id,
+                            target_tip_id=process.target_tip_id,
+                        )
+
+                current_height = self.canonical_height()
+                height_delta = max(0, current_height - last_height)
+                last_height = current_height
+                pending_update += height_delta
+
+                if progress_bar is not None and (
+                    pending_update >= refresh_blocks or current_height >= total
+                ):
+                    progress_bar.update(pending_update)
+                    pending_update = 0
+
+            if progress_bar is not None and pending_update > 0:
+                progress_bar.update(pending_update)
+
+            return self._summarize()
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
+
+
 def parse_pool_spec(spec: str) -> List[PoolConfig]:
     pools: List[PoolConfig] = []
     seen: set[str] = set()
@@ -779,6 +870,11 @@ def validate_inputs(
         raise ValueError("three_traitor must be one of b,s")
     if four_traitor not in {"1", "2", "3"}:
         raise ValueError("four_traitor must be one of 1,2,3")
+
+
+def validate_jobs(jobs: int) -> None:
+    if jobs <= 0:
+        raise ValueError("jobs must be positive")
 
 
 def build_scenarios(
@@ -912,10 +1008,13 @@ def plot_summary(
         import matplotlib
 
         matplotlib.use("Agg", force=True)
+        import scienceplots  # noqa: F401
         import matplotlib.pyplot as plt
     except Exception:
         print("[warn] matplotlib unavailable, skip plotting")
         return
+
+    plt.style.use(["science", "ieee"])
 
     pool_ids = [str(row["pool_id"]) for row in summary_rows]
     x = np.arange(len(pool_ids))
@@ -936,7 +1035,7 @@ def plot_summary(
         y_min, y_max = 0.0, 1.0
 
     width = 0.12
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
     for idx, (key, label) in enumerate(series):
         values = [float(row[key]) for row in summary_rows]
         offset = (idx - 2) * width
@@ -944,17 +1043,19 @@ def plot_summary(
 
     ax.set_xticks(x)
     ax.set_xticklabels(pool_ids)
-    ax.set_xlabel("pool")
-    ax.set_ylabel("ratio")
+    ax.set_xlabel("pool", fontsize=12)
+    ax.set_ylabel("ratio", fontsize=12)
+    ax.tick_params(labelsize=10)
     ax.set_title(title)
     ax.set_ylim(y_min, y_max)
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.legend(fontsize=10)
     fig.tight_layout()
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_png, dpi=180)
-    fig.savefig(output_pdf)
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
+    fig.savefig(output_pdf, format="pdf", dpi=300, bbox_inches="tight")
+    plt.show()
     plt.close(fig)
 
 
@@ -966,40 +1067,115 @@ def run_experiment(
     scenarios: Sequence[ScenarioConfig],
     seed_base: int,
     max_events: int,
+    jobs: int,
+    show_progress: bool,
+) -> List[RunResult]:
+    tasks = [
+        (experiment, pools, sim_config, scenario, seed_base, max_events, run_id)
+        for scenario in scenarios
+        for run_id in range(sim_config.runs)
+    ]
+    effective_jobs = min(jobs, len(tasks))
+    if jobs > effective_jobs:
+        print(
+            "[info] parallelism is per run, "
+            f"so effective_jobs=min(jobs, scenario_count*runs)={effective_jobs}"
+        )
+
+    if effective_jobs <= 1:
+        results = [_run_single_experiment_task(*task) for task in tasks]
+    else:
+        try:
+            results = _collect_parallel_experiment_results(
+                tasks=tasks,
+                executor_cls=concurrent.futures.ProcessPoolExecutor,
+                max_workers=effective_jobs,
+                show_progress=show_progress,
+                progress_desc=f"{experiment} runs",
+            )
+        except (PermissionError, OSError):
+            print(
+                "[warn] process-based parallelism is unavailable here; "
+                "falling back to ThreadPoolExecutor"
+            )
+            results = _collect_parallel_experiment_results(
+                tasks=tasks,
+                executor_cls=concurrent.futures.ThreadPoolExecutor,
+                max_workers=effective_jobs,
+                show_progress=show_progress,
+                progress_desc=f"{experiment} runs",
+            )
+
+    results.sort(
+        key=lambda result: (SCENARIO_ORDER.index(result.scenario), int(result.run_id))
+    )
+    return results
+
+
+def _run_single_experiment_task(
+    experiment: str,
+    pools: Sequence[PoolConfig],
+    sim_config: SimConfig,
+    scenario: ScenarioConfig,
+    seed_base: int,
+    max_events: int,
+    run_id: int,
+) -> RunResult:
+    seed = make_seed(seed_base, experiment, scenario.name, run_id)
+    sim_cls: type[CollusionSimulation]
+    if scenario.name == "BetrayTolerated":
+        sim_cls = FastCollusionSimulation
+    else:
+        sim_cls = CollusionSimulation
+
+    sim = sim_cls(
+        experiment=experiment,
+        sim_config=sim_config,
+        pools=pools,
+        scenario=scenario,
+        run_id=run_id,
+        seed=seed,
+        max_events=max_events,
+    )
+    result = sim.simulate_one_run()
+    if scenario.name == "BetrayBreakShort":
+        expected = sim_config.betray_on_nth_opportunity
+        if result.opportunity_at_betray != expected:
+            raise RuntimeError(
+                "Nth-opportunity sanity check failed: "
+                f"opportunity_at_betray={result.opportunity_at_betray}, expected={expected}"
+            )
+    return result
+
+
+def _collect_parallel_experiment_results(
+    *,
+    tasks: Sequence[
+        tuple[str, Sequence[PoolConfig], SimConfig, ScenarioConfig, int, int, int]
+    ],
+    executor_cls: type[concurrent.futures.Executor],
+    max_workers: int,
+    show_progress: bool,
+    progress_desc: str,
 ) -> List[RunResult]:
     results: List[RunResult] = []
-
-    for scenario in scenarios:
-        for run_id in range(sim_config.runs):
-            seed = make_seed(seed_base, experiment, scenario.name, run_id)
-            # print(
-            # f"[{experiment}] scenario={scenario.name} run={run_id + 1}/{sim_config.runs} seed={seed}"
-            # )
-            sim = CollusionSimulation(
-                experiment=experiment,
-                sim_config=sim_config,
-                pools=pools,
-                scenario=scenario,
-                run_id=run_id,
-                seed=seed,
-                max_events=max_events,
-            )
-            result = sim.simulate_one_run()
-
-            if scenario.name == "BetrayBreakShort":
-                expected = sim_config.betray_on_nth_opportunity
-                if result.opportunity_at_betray != expected:
-                    raise RuntimeError(
-                        "Nth-opportunity sanity check failed: "
-                        f"opportunity_at_betray={result.opportunity_at_betray}, expected={expected}"
-                    )
-                # print(
-                # "  sanity: short betray at nth opportunity "
-                # f"({result.opportunity_at_betray})"
-                # )
-
-            results.append(result)
-
+    with executor_cls(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_run_single_experiment_task, *task) for task in tasks
+        ]
+        if tqdm is None or not show_progress:
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+        else:
+            with tqdm(
+                total=len(futures),
+                desc=progress_desc,
+                unit="run",
+                dynamic_ncols=True,
+            ) as progress_bar:
+                for future in concurrent.futures.as_completed(futures):
+                    results.append(future.result())
+                    progress_bar.update(1)
     return results
 
 
@@ -1013,23 +1189,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cartel-TBW collusion simulation")
     parser.add_argument("--T", type=float, default=10.0)
     parser.add_argument("--gamma", type=float, default=0)
-    parser.add_argument("--runs", type=int, default=100)
-    parser.add_argument("--target-blocks-long", type=int, default=2016)
+    parser.add_argument("--runs", type=int, default=10)
+    parser.add_argument("--target-blocks-long", type=int, default=20160)
 
-    parser.add_argument("--betray-on-nth-opportunity", type=int, default=3)
-    parser.add_argument("--betray-start-height", type=int, default=20)
-    parser.add_argument("--q", type=float, default=0.7)
-    parser.add_argument("--betray-threshold", type=int, default=10)
+    parser.add_argument("--betray-on-nth-opportunity", type=int, default=1)
+    parser.add_argument("--betray-start-height", type=int, default=1)
+    parser.add_argument("--q", type=float, default=1)
+    parser.add_argument("--betray-threshold", type=int, default=500)
 
-    parser.add_argument("--three-pools", type=str, default="b=0.35,s=0.30,h=0.35")
+    parser.add_argument("--three-pools", type=str, default="b=0.33,s=0.33,h=0.34")
     parser.add_argument("--three-traitor", type=str, default="s")
-    parser.add_argument("--four-pools", type=str, default="1=0.20,2=0.20,3=0.20,h=0.4")
+    parser.add_argument("--four-pools", type=str, default="1=0.25,2=0.2,3=0.15,h=0.4")
     parser.add_argument("--four-traitor", type=str, default="3")
 
     parser.add_argument("--seed-base", type=int, default=20260224)
     parser.add_argument("--max-events", type=int, default=2_000_000)
+    parser.add_argument("--jobs", type=int, default=30)
     parser.add_argument("--output-dir", type=Path, default=Path("results/collusion"))
     parser.add_argument("--skip-plots", action="store_true")
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="disable tqdm progress display to reduce terminal overhead",
+    )
     return parser
 
 
@@ -1065,6 +1247,7 @@ def main() -> None:
     args = parser.parse_args()
 
     run_option_a_unit_tests()
+    validate_jobs(args.jobs)
 
     three_pools = parse_pool_spec(args.three_pools)
     four_pools = parse_pool_spec(args.four_pools)
@@ -1108,6 +1291,8 @@ def main() -> None:
         scenarios=scenarios_three,
         seed_base=args.seed_base,
         max_events=args.max_events,
+        jobs=args.jobs,
+        show_progress=not args.no_progress,
     )
     print("[three] experiment completed")
 
@@ -1118,6 +1303,8 @@ def main() -> None:
         scenarios=scenarios_four,
         seed_base=args.seed_base,
         max_events=args.max_events,
+        jobs=args.jobs,
+        show_progress=not args.no_progress,
     )
     print("[four] experiment completed")
 
