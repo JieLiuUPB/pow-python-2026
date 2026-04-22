@@ -357,7 +357,9 @@ class TBWSimulation:
                     t_publish=self.t,
                 )
             )
-            bnext_id = self._publish_new_block(parent_id=bn.id, miner="A", t_publish=self.t)
+            bnext_id = self._publish_new_block(
+                parent_id=bn.id, miner="A", t_publish=self.t
+            )
             self.counters.success_race += 1
             self._log("mine_A_race_success", block_id=bnext_id)
             self._reset_attacker()
@@ -616,12 +618,6 @@ def aggregate_metric(values: List[float]) -> tuple[float, float]:
     return mean(values), stdev(values)
 
 
-def theoretical_orphan_rate(p: float) -> float:
-    a = (4 - 2 * p) * (1 - p) * p**3
-    b = (1 + p) ** 2
-    return a / b
-
-
 def validate_jobs(jobs: int) -> None:
     if jobs <= 0:
         raise ValueError("jobs must be positive")
@@ -756,113 +752,6 @@ def _execute_tbw_tasks(
             show_progress=show_progress,
             progress_desc=progress_desc,
         )
-
-
-def scenario1(
-    *,
-    T: float,
-    runs: int,
-    epoch_len: int,
-    base_seed: int,
-    results_root: Path,
-    save_sample_event_log: bool,
-    jobs: int,
-    show_progress: bool,
-) -> tuple[List[RunResult], List[Dict[str, Any]]]:
-    p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
-    scenario_name = "scenario1_no_daa_by_blocks"
-    out_dir = results_root / scenario_name
-    ensure_dir(out_dir)
-
-    tasks = []
-    for p in p_values:
-        for run_id in range(runs):
-            seed = derive_seed(base_seed, scenario_name, p, run_id, None)
-            log_events = (
-                save_sample_event_log and (abs(p - 0.60) < 1e-9) and run_id == 0
-            )
-            tasks.append(
-                (
-                    T,
-                    p,
-                    seed,
-                    "by_blocks",
-                    None,
-                    epoch_len,
-                    False,
-                    epoch_len,
-                    scenario_name,
-                    run_id,
-                    None,
-                    log_events,
-                    None,
-                )
-            )
-
-    task_results = _execute_tbw_tasks(
-        tasks,
-        jobs=jobs,
-        show_progress=show_progress,
-        progress_desc="scenario1 runs",
-    )
-
-    raw_results: List[RunResult] = []
-    for run_result, _, event_log in task_results:
-        raw_results.append(run_result)
-        if event_log:
-            event_path = (
-                out_dir / f"event_log_p{run_result.p:.2f}_run{run_result.run_id}.csv"
-            )
-            fields = sorted({k for row in event_log for k in row.keys()})
-            write_csv(event_path, event_log, fields)
-
-    raw_results.sort(key=lambda r: (float(r.p), int(r.run_id)))
-
-    raw_rows = [r.to_dict() for r in raw_results]
-    raw_fields = list(raw_rows[0].keys()) if raw_rows else []
-    write_csv(out_dir / "raw_runs.csv", raw_rows, raw_fields)
-
-    summary_rows: List[Dict[str, Any]] = []
-    for p in p_values:
-        p_rows = [r for r in raw_results if abs(r.p - p) < 1e-12]
-        values = [r.A_share for r in p_rows]
-        orphan_totals = [r.A_orphan_published + r.H_orphan_published for r in p_rows]
-        orphan_rates = [
-            (total / epoch_len) if epoch_len > 0 else 0.0 for total in orphan_totals
-        ]
-        m, s = aggregate_metric(values)
-        orphan_sum_mean = mean(orphan_totals) if orphan_totals else 0.0
-        orphan_rate_mean, orphan_rate_std = aggregate_metric(orphan_rates)
-        summary_rows.append(
-            {
-                "p": p,
-                "metric": "A_share",
-                "metric_mean": m,
-                "metric_std": s,
-                "runs": runs,
-                "orphan_sum_mean": orphan_sum_mean,
-                "orphan_rate_sim": orphan_rate_mean,
-                "orphan_rate_std": orphan_rate_std,
-                "orphan_rate_formula": theoretical_orphan_rate(p),
-            }
-        )
-
-    write_csv(
-        out_dir / "summary.csv",
-        summary_rows,
-        [
-            "p",
-            "metric",
-            "metric_mean",
-            "metric_std",
-            "runs",
-            "orphan_sum_mean",
-            "orphan_rate_sim",
-            "orphan_rate_std",
-            "orphan_rate_formula",
-        ],
-    )
-    return raw_results, summary_rows
 
 
 def scenario2(
@@ -1072,7 +961,11 @@ def scenario3(
 
 
 def apply_plot_theme(plt_mod: Any) -> None:
-    plt_mod.style.use(["science", "ieee"])
+    try:
+        plt_mod.style.use(["science", "ieee", "no-latex"])
+    except Exception:
+        plt_mod.style.use(["science", "ieee"])
+    plt_mod.rcParams["text.usetex"] = False
 
 
 def save_figure_bundle(fig_dir: Path, stem: str, fig: Any) -> None:
@@ -1092,190 +985,6 @@ def save_plot_data(fig_dir: Path, stem: str, rows: Sequence[Dict[str, Any]]) -> 
         row_list,
         list(row_list[0].keys()),
     )
-
-
-def plot_scenario1(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
-    plt_mod = get_plt()
-    if plt_mod is None:
-        return
-    ensure_dir(fig_dir)
-    apply_plot_theme(plt_mod)
-
-    rows = sorted(summary_rows, key=lambda r: r["p"])
-    p_vals = np.array([row["p"] for row in rows], dtype=float)
-    means = np.array([row["metric_mean"] for row in rows], dtype=float)
-    stds = np.array([row["metric_std"] for row in rows], dtype=float)
-    p_dense = np.linspace(
-        float(np.min(p_vals)), float(np.max(p_vals)), 400, dtype=float
-    )
-    theory_dense = 2.0 * p_dense * p_dense * (2.0 - p_dense) / (1.0 + p_dense)
-    theory_at_points = 2.0 * p_vals * p_vals * (2.0 - p_vals) / (1.0 + p_vals)
-
-    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
-    ax.errorbar(
-        p_vals,
-        means,
-        yerr=stds,
-        fmt="o-",
-        color="#155eef",
-        ecolor="#8eb4ff",
-        linewidth=2.2,
-        elinewidth=1.5,
-        capsize=4,
-        markersize=3,
-        markerfacecolor="none",
-        markeredgewidth=1.6,
-        label="TBW simulation",
-        zorder=3,
-    )
-    ax.fill_between(
-        p_vals,
-        means - stds,
-        means + stds,
-        color="#155eef",
-        alpha=0.10,
-        zorder=2,
-    )
-    ax.plot(
-        p_dense,
-        theory_dense,
-        linestyle="--",
-        color="#0f766e",
-        linewidth=2.0,
-        label="theory",
-        zorder=2,
-    )
-    ax.plot(
-        p_vals,
-        p_vals,
-        linestyle="--",
-        color="#2f3a4f",
-        linewidth=1.8,
-        label="baseline y=x",
-        zorder=1,
-    )
-    ax.set_xlabel("Attacker hashrate p", fontsize=12)
-    ax.set_ylabel("mean(A_share)", fontsize=12)
-    ax.tick_params(labelsize=10)
-    ax.set_title("Scenario 1: Relative Share (No DAA, canonical length = 2016)")
-    ax.legend(loc="upper left", fontsize=10)
-    ax.margins(x=0.02)
-    ax.set_ylim(bottom=max(0.0, float(np.min(means - stds)) - 0.02))
-    ax.grid(True, linestyle="--", alpha=0.6)
-
-    fig.tight_layout()
-    save_figure_bundle(fig_dir, "s1_relative_share", fig)
-    plt_mod.show()
-    plt_mod.close(fig)
-
-    data_rows = [
-        {
-            "p": float(p_vals[i]),
-            "metric_mean": float(means[i]),
-            "metric_std": float(stds[i]),
-            "theory_relative_share": float(theory_at_points[i]),
-            "baseline_y_equals_x": float(p_vals[i]),
-        }
-        for i in range(len(p_vals))
-    ]
-    save_plot_data(fig_dir, "s1_relative_share", data_rows)
-
-
-def plot_scenario1_orphan_rate(
-    summary_rows: List[Dict[str, Any]], fig_dir: Path
-) -> None:
-    plt_mod = get_plt()
-    if plt_mod is None:
-        return
-    ensure_dir(fig_dir)
-    apply_plot_theme(plt_mod)
-
-    rows = sorted(summary_rows, key=lambda r: r["p"])
-    p_vals = np.array([row["p"] for row in rows], dtype=float)
-    orphan_rate_sim = np.array([row["orphan_rate_sim"] for row in rows], dtype=float)
-    orphan_rate_std = np.array([row["orphan_rate_std"] for row in rows], dtype=float)
-    orphan_rate_formula = np.array(
-        [row["orphan_rate_formula"] for row in rows], dtype=float
-    )
-    p_dense = np.linspace(
-        float(np.min(p_vals)), float(np.max(p_vals)), 400, dtype=float
-    )
-    orphan_rate_formula_dense = np.array(
-        [theoretical_orphan_rate(float(p)) for p in p_dense],
-        dtype=float,
-    )
-
-    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
-    ax.errorbar(
-        p_vals,
-        orphan_rate_sim,
-        yerr=orphan_rate_std,
-        fmt="o-",
-        capsize=4,
-        color="#155eef",
-        linewidth=2.2,
-        markersize=3,
-        markerfacecolor="none",
-        markeredgewidth=1.6,
-        label="simulation orphan rate",
-        zorder=3,
-    )
-    ax.fill_between(
-        p_vals,
-        orphan_rate_sim - orphan_rate_std,
-        orphan_rate_sim + orphan_rate_std,
-        color="#155eef",
-        alpha=0.10,
-        zorder=2,
-    )
-    ax.plot(
-        p_vals,
-        orphan_rate_sim + orphan_rate_std,
-        color="#155eef",
-        linewidth=1.0,
-        alpha=0.45,
-        zorder=2,
-    )
-    ax.plot(
-        p_vals,
-        orphan_rate_sim - orphan_rate_std,
-        color="#155eef",
-        linewidth=1.0,
-        alpha=0.45,
-        zorder=2,
-    )
-    ax.plot(
-        p_dense,
-        orphan_rate_formula_dense,
-        linestyle="--",
-        color="#0f766e",
-        linewidth=2.0,
-        label="I(p)",
-        zorder=2,
-    )
-    ax.set_xlabel("Attacker hashrate p", fontsize=12)
-    ax.set_ylabel("orphan rate", fontsize=12)
-    ax.tick_params(labelsize=10)
-    ax.set_title("Scenario 1: Orphan Rate vs p")
-    ax.legend(loc="upper left", fontsize=10)
-    ax.margins(x=0.02)
-    ax.grid(True, linestyle="--", alpha=0.6)
-
-    fig.tight_layout()
-    save_figure_bundle(fig_dir, "s1_orphan_rate_vs_p", fig)
-    plt_mod.show()
-    plt_mod.close(fig)
-
-    data_rows = [
-        {
-            "p": float(p_vals[i]),
-            "orphan_rate_sim": float(orphan_rate_sim[i]),
-            "orphan_rate_std": float(orphan_rate_std[i]),
-            "orphan_rate_formula": float(orphan_rate_formula[i]),
-        }
-        for i in range(len(p_vals))
-    ]
-    save_plot_data(fig_dir, "s1_orphan_rate_vs_p", data_rows)
 
 
 def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
@@ -1441,10 +1150,10 @@ def write_config_summary(
 
 def parse_scenarios(raw: str) -> List[str]:
     if raw.strip().lower() == "all":
-        return ["1", "2", "3"]
+        return ["2", "3"]
     parts = [x.strip() for x in raw.split(",") if x.strip()]
     for p in parts:
-        if p not in {"1", "2", "3"}:
+        if p not in {"2", "3"}:
             raise ValueError(f"Invalid scenario selector: {p}")
     return parts
 
@@ -1452,11 +1161,11 @@ def parse_scenarios(raw: str) -> List[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="TBW PoW simulation runner")
     parser.add_argument(
-        "--scenarios", default="all", help="all or comma-separated subset of 1,2,3"
+        "--scenarios", default="all", help="all or comma-separated subset of 2,3"
     )
     parser.add_argument("--T", type=float, default=10.0, help="Target block interval")
     parser.add_argument(
-        "--runs", type=int, default=100, help="Independent runs per configuration"
+        "--runs", type=int, default=10, help="Independent runs per configuration"
     )
     parser.add_argument(
         "--epoch-len", type=int, default=2016, help="Epoch length in canonical blocks"
@@ -1470,11 +1179,6 @@ def main() -> None:
         "--figures-dir", default="figures", help="Figure output directory"
     )
     parser.add_argument("--skip-plots", action="store_true", help="Skip plotting")
-    parser.add_argument(
-        "--no-sample-event-log",
-        action="store_true",
-        help="Do not save sample event log for scenario1 p=0.60 run0",
-    )
     parser.add_argument(
         "--no-progress",
         action="store_true",
@@ -1505,22 +1209,8 @@ def main() -> None:
     print("  gamma=0, private lead<=1, Poisson mining, tie by earlier t_publish")
     print("  DAA formula: D_new = D_old * (2016*T) / T_total")
 
-    s1_summary: List[Dict[str, Any]] = []
     s2_summary: List[Dict[str, Any]] = []
     s3_summary: List[Dict[str, Any]] = []
-    if "1" in scenarios:
-        _, s1_summary = scenario1(
-            T=args.T,
-            runs=args.runs,
-            epoch_len=args.epoch_len,
-            base_seed=args.base_seed,
-            results_root=results_dir,
-            save_sample_event_log=not args.no_sample_event_log,
-            jobs=args.jobs,
-            show_progress=not args.no_progress,
-        )
-        print("Scenario 1 completed")
-
     if "2" in scenarios:
         _, s2_summary = scenario2(
             T=args.T,
@@ -1549,9 +1239,6 @@ def main() -> None:
         if get_plt() is None:
             print("matplotlib unavailable, skipped plotting")
         else:
-            if s1_summary:
-                plot_scenario1(s1_summary, figures_dir)
-                plot_scenario1_orphan_rate(s1_summary, figures_dir)
             if s2_summary:
                 plot_scenario2(s2_summary, figures_dir)
             if s3_summary:

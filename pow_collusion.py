@@ -482,37 +482,44 @@ class CollusionSimulation:
         if self.canon_len_at_betray is None:
             self.canon_len_at_betray = self.canonical_height()
 
-    def _on_member_first_block(self, miner_id: str, parent_id: int) -> None:
-        mined_height = self.blocks_by_id[parent_id].height + 1
-        public_tip_height = self.canonical_height()
-
+    def _is_traitor_member(self, miner_id: str) -> bool:
         traitor_id = self.scenario.betray.traitor_id
-        miner_is_traitor_and_member = (
+        return (
             traitor_id is not None
             and miner_id == traitor_id
             and miner_id in self.controller.members
         )
 
-        should_betray = False
-        if self.is_traitor_opportunity(
-            cartel_state=self.controller.state,
-            mined_height=mined_height,
-            public_tip_height=public_tip_height,
-            miner_is_traitor_and_member=miner_is_traitor_and_member,
-        ):
-            self.opportunity_count_traitor += 1
-            if self.scenario.betray.mode == "short":
-                should_betray = self.should_betray_short()
-            elif self.scenario.betray.mode == "prob":
-                should_betray = self.should_betray_prob()
+    def _should_betray_after_cartel_mine(self, miner_id: str) -> bool:
+        if not self._is_traitor_member(miner_id):
+            return False
+        if self.scenario.betray.mode == "none":
+            return False
 
-        if should_betray:
-            block = self._publish_public_block(parent_id=parent_id, miner_id=miner_id)
-            self.betray_count += 1
-            self.betray_triggered = True
-            self.opportunity_at_betray = self.opportunity_count_traitor
-            self.canon_len_at_betray = self.canonical_height()
-            self._apply_break_if_needed()
+        self.opportunity_count_traitor += 1
+        if self.scenario.betray.mode == "short":
+            return self.should_betray_short()
+        if self.scenario.betray.mode == "prob":
+            return self.should_betray_prob()
+        raise RuntimeError(f"Unknown betray mode: {self.scenario.betray.mode}")
+
+    def _record_betrayal(self) -> None:
+        self.betray_count += 1
+        self.betray_triggered = True
+        self.opportunity_at_betray = self.opportunity_count_traitor
+        self.canon_len_at_betray = self.canonical_height()
+        self._apply_break_if_needed()
+
+    def _on_member_first_block(self, miner_id: str, parent_id: int) -> None:
+        mined_height = self.blocks_by_id[parent_id].height + 1
+        public_tip_height = self.canonical_height()
+
+        if (
+            mined_height == public_tip_height + 1
+            and self._should_betray_after_cartel_mine(miner_id)
+        ):
+            self._publish_public_block(parent_id=parent_id, miner_id=miner_id)
+            self._record_betrayal()
             return
 
         p_cartel = self.controller.cartel_power(self.pool_rates)
@@ -539,6 +546,21 @@ class CollusionSimulation:
 
         private_bn = self.controller.private_bn
         if state == "WITHHOLD":
+            if self._should_betray_after_cartel_mine(miner_id):
+                public_bn = self._publish_public_block(
+                    parent_id=private_bn.parent_public_id,
+                    miner_id=private_bn.miner_id,
+                    t_publish=self.t,
+                )
+                self._publish_public_block(
+                    parent_id=public_bn.id,
+                    miner_id=miner_id,
+                    t_publish=self.t,
+                )
+                self._record_betrayal()
+                self.controller.reset_round()
+                return
+
             public_bn = self._publish_public_block(
                 parent_id=private_bn.parent_public_id,
                 miner_id=private_bn.miner_id,
@@ -987,7 +1009,11 @@ def plot_summary(
         print("[warn] matplotlib unavailable, skip plotting")
         return
 
-    plt.style.use(["science", "ieee"])
+    try:
+        plt.style.use(["science", "ieee", "no-latex"])
+    except Exception:
+        plt.style.use(["science", "ieee"])
+    plt.rcParams["text.usetex"] = False
 
     pool_ids = [str(row["pool_id"]) for row in summary_rows]
     x = np.arange(len(pool_ids))
@@ -1213,6 +1239,77 @@ def run_option_a_unit_tests() -> None:
         public_tip_height=10,
         miner_is_traitor_and_member=False,
     )
+
+    sim_config = SimConfig(
+        T=10.0,
+        gamma=0.0,
+        runs=1,
+        target_blocks_long=10,
+        betray_on_nth_opportunity=1,
+        betray_start_height=0,
+        q=1.0,
+        betray_threshold=10,
+    )
+    pools = parse_pool_spec("b=0.33,s=0.33,h=0.34")
+
+    compliant = CollusionSimulation(
+        experiment="three",
+        sim_config=sim_config,
+        pools=pools,
+        scenario=ScenarioConfig(
+            name="AlwaysCartel",
+            mode="long",
+            initial_members=("b", "s"),
+            break_rule="none",
+            betray=BetrayConfig(mode="none", traitor_id="s"),
+        ),
+        run_id=0,
+        seed=1,
+        max_events=100,
+    )
+    compliant._on_member_first_block(miner_id="b", parent_id=0)
+    assert compliant.controller.state == "WITHHOLD"
+    assert compliant.controller.private_bn is not None
+    compliant._on_private_mine(miner_id="s")
+    assert compliant.controller.state == "WITHHOLD"
+    assert compliant.controller.private_bn is not None
+    assert compliant.controller.private_bn.miner_id == "s"
+    assert compliant.canonical_height() == 1
+
+    betraying = CollusionSimulation(
+        experiment="three",
+        sim_config=sim_config,
+        pools=pools,
+        scenario=ScenarioConfig(
+            name="BetrayTolerated",
+            mode="long",
+            initial_members=("b", "s"),
+            break_rule="none",
+            betray=BetrayConfig(
+                mode="prob",
+                traitor_id="s",
+                betray_on_nth_opportunity=1,
+                betray_start_height=0,
+                q=1.0,
+                betray_threshold=10,
+            ),
+        ),
+        run_id=0,
+        seed=1,
+        max_events=100,
+    )
+    betraying._on_member_first_block(miner_id="b", parent_id=0)
+    assert betraying.controller.state == "WITHHOLD"
+    betraying._on_private_mine(miner_id="s")
+    assert betraying.controller.state == "IDLE"
+    assert betraying.canonical_height() == 2
+    assert betraying.betray_count == 1
+    assert betraying.opportunity_count_traitor == 1
+    chain = betraying.reconstruct_chain()
+    assert [betraying.blocks_by_id[block_id].miner_id for block_id in chain] == [
+        "b",
+        "s",
+    ]
 
 
 def main() -> None:

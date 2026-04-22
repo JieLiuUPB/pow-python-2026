@@ -1,116 +1,22 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import math
 from statistics import mean
 
-from tqdm import tqdm
-
 from pow_collusion import (
-    BetrayConfig,
-    Block,
-    CollusionSimulation,
-    PoolConfig,
-    ScenarioConfig,
     SimConfig,
-    make_seed,
+    build_scenarios,
     parse_pool_spec,
+    run_experiment,
+    run_option_a_unit_tests,
+    validate_jobs,
 )
-
-
-class FastCollusionSimulation(CollusionSimulation):
-    def _publish_public_block(
-        self, parent_id: int, miner_id: str, t_publish: float | None = None
-    ) -> Block:
-        t_block = self.t if t_publish is None else t_publish
-        block_id = self._new_public_id()
-        height = self.blocks_by_id[parent_id].height + 1
-        block = Block(
-            id=block_id,
-            parent_id=parent_id,
-            height=height,
-            miner_id=miner_id,
-            t_publish=t_block,
-            is_public=True,
-        )
-        self.blocks_by_id[block_id] = block
-        self.tips.add(block_id)
-        self.tips.discard(parent_id)
-        self.canonical_tip_id = self.get_canonical_tip()
-        return block
-
-    def simulate_one_run(
-        self,
-        progress_step_percent: int = 10,
-        *,
-        use_tqdm: bool = False,
-    ) -> "RunResult":
-        num_events = 0
-        total = self.sim_config.target_blocks_long
-        refresh_blocks = max(1, math.ceil(total * progress_step_percent / 100))
-        last_height = self.canonical_height()
-        pending_update = 0
-
-        progress_bar = None
-        if use_tqdm:
-            progress_bar = tqdm(
-                total=total,
-                desc=f"run {self.run_id + 1}",
-                unit="blk",
-                dynamic_ncols=True,
-            )
-
-        try:
-            while not self._should_stop():
-                if num_events >= self.max_events:
-                    raise RuntimeError(
-                        f"Exceeded max_events={self.max_events}, scenario={self.scenario.name}, run={self.run_id}"
-                    )
-                num_events += 1
-
-                processes = self.build_mining_processes()
-                event = self.sample_next_event(processes)
-                self.t = event.t_event
-
-                if event.event_type == "RELEASE_CARTEL":
-                    self.on_deadline()
-                else:
-                    if event.mine_process is None:
-                        raise RuntimeError("MINE event without process")
-
-                    process = event.mine_process
-                    if process.target_kind == "private":
-                        self._on_private_mine(miner_id=process.pool_id)
-                    else:
-                        self._on_public_mine(
-                            miner_id=process.pool_id,
-                            target_tip_id=process.target_tip_id,
-                        )
-
-                current_height = self.canonical_height()
-                height_delta = max(0, current_height - last_height)
-                last_height = current_height
-                pending_update += height_delta
-
-                if progress_bar is not None and (
-                    pending_update >= refresh_blocks or current_height >= total
-                ):
-                    progress_bar.update(pending_update)
-                    pending_update = 0
-
-            if progress_bar is not None and pending_update > 0:
-                progress_bar.update(pending_update)
-
-            return self._summarize()
-        finally:
-            if progress_bar is not None:
-                progress_bar.close()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Three-pool BetrayTolerated simulation (minimal runner)"
+        description="Three-pool BetrayTolerated simulation"
     )
     parser.add_argument("--T", type=float, default=10.0)
     parser.add_argument("--gamma", type=float, default=0.0)
@@ -122,17 +28,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q", type=float, default=1.0)
     parser.add_argument("--betray-threshold", type=int, default=100)
 
-    parser.add_argument("--three-pools", type=str, default="b=0.33,s=0.33,h=0.34")
+    parser.add_argument("--three-pools", type=str, default="b=0.30,s=0.50,h=0.20")
     parser.add_argument("--three-traitor", type=str, default="s")
     parser.add_argument("--seed-base", type=int, default=20260224)
     parser.add_argument("--max-events", type=int, default=20_000_000)
-    parser.add_argument("--progress-step-percent", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=10)
+    parser.add_argument(
+        "--progress-step-percent",
+        type=int,
+        default=1,
+        help="deprecated compatibility flag; ignored to match pow_collusion.py",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="disable tqdm progress display to reduce terminal overhead",
+    )
     return parser
 
 
 def validate_three_only(
-    sim_config: SimConfig, pools: list[PoolConfig], traitor: str
+    sim_config: SimConfig, three_pools_spec: str, traitor: str
 ) -> None:
     if sim_config.T <= 0:
         raise ValueError("T must be > 0")
@@ -151,64 +67,38 @@ def validate_three_only(
     if sim_config.betray_threshold <= 0:
         raise ValueError("betray_threshold must be positive")
 
-    total = sum(p.hashrate for p in pools)
+    three_pools = parse_pool_spec(three_pools_spec)
+    total = sum(pool.hashrate for pool in three_pools)
     if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
         raise ValueError(f"three hashrates must sum to 1.0, got {total}")
-    for pool in pools:
+    for pool in three_pools:
         if pool.hashrate < 0.0:
             raise ValueError(
                 f"three has negative hashrate: {pool.pool_id}={pool.hashrate}"
             )
 
-    ids = {p.pool_id for p in pools}
-    if {"b", "s", "h"} - ids:
+    pool_ids = {pool.pool_id for pool in three_pools}
+    if {"b", "s", "h"} - pool_ids:
         raise ValueError("three_pools must contain ids: b,s,h")
+    if traitor not in pool_ids:
+        raise ValueError(f"three_traitor {traitor} not in pools")
     if traitor not in {"b", "s"}:
         raise ValueError("three_traitor must be one of b,s")
-    if traitor not in ids:
-        raise ValueError(f"three_traitor {traitor} not in pools")
-
-
-def validate_progress_step_percent(progress_step_percent: int) -> None:
-    if not (1 <= progress_step_percent <= 100):
-        raise ValueError("progress_step_percent must be in [1, 100]")
-
-
-def validate_jobs(jobs: int) -> None:
-    if jobs <= 0:
-        raise ValueError("jobs must be positive")
-
-
-def run_single(
-    run_id: int,
-    args: argparse.Namespace,
-    sim_config: SimConfig,
-    three_pools: list[PoolConfig],
-    scenario: ScenarioConfig,
-    use_tqdm: bool = False,
-) -> "RunResult":
-    seed = make_seed(args.seed_base, "three", scenario.name, run_id)
-    sim = FastCollusionSimulation(
-        experiment="three",
-        sim_config=sim_config,
-        pools=three_pools,
-        scenario=scenario,
-        run_id=run_id,
-        seed=seed,
-        max_events=args.max_events,
-    )
-    return sim.simulate_one_run(
-        progress_step_percent=args.progress_step_percent,
-        use_tqdm=use_tqdm,
-    )
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    three_pools = parse_pool_spec(args.three_pools)
-    validate_progress_step_percent(args.progress_step_percent)
+
+    run_option_a_unit_tests()
     validate_jobs(args.jobs)
 
+    if args.progress_step_percent != 1:
+        print(
+            "[info] --progress-step-percent is ignored; "
+            "progress handling now follows pow_collusion.py"
+        )
+
+    three_pools = parse_pool_spec(args.three_pools)
     sim_config = SimConfig(
         T=args.T,
         gamma=args.gamma,
@@ -219,94 +109,35 @@ def main() -> None:
         q=args.q,
         betray_threshold=args.betray_threshold,
     )
-    validate_three_only(sim_config, three_pools, args.three_traitor)
+    validate_three_only(sim_config, args.three_pools, args.three_traitor)
 
-    scenario = ScenarioConfig(
-        name="BetrayTolerated",
-        mode="long",
+    scenarios = build_scenarios(
+        sim_config=sim_config,
+        experiment="three",
         initial_members=("b", "s"),
-        break_rule="none",
-        betray=BetrayConfig(
-            mode="prob",
-            traitor_id=args.three_traitor,
-            betray_on_nth_opportunity=sim_config.betray_on_nth_opportunity,
-            betray_start_height=sim_config.betray_start_height,
-            q=sim_config.q,
-            betray_threshold=sim_config.betray_threshold,
-        ),
+        traitor_id=args.three_traitor,
+    )
+    scenario = next(item for item in scenarios if item.name == "BetrayTolerated")
+
+    results = run_experiment(
+        experiment="three",
+        pools=three_pools,
+        sim_config=sim_config,
+        scenarios=[scenario],
+        seed_base=args.seed_base,
+        max_events=args.max_events,
+        jobs=args.jobs,
+        show_progress=not args.no_progress,
     )
 
-    pool_ids = [p.pool_id for p in three_pools]
-    results = []
-    effective_jobs = min(args.jobs, sim_config.runs)
-    if args.jobs > effective_jobs:
-        print(
-            "[info] parallelism is per run, "
-            f"so effective_jobs=min(jobs, runs)={effective_jobs}"
-        )
-
-    if effective_jobs <= 1:
-        if args.jobs > 1 and sim_config.runs <= 1:
-            print(
-                "[info] only one run was requested; "
-                "a single run is not split across multiple processes"
-            )
-        for run_id in range(sim_config.runs):
-            result = run_single(
-                run_id,
-                args,
-                sim_config,
-                three_pools,
-                scenario,
-                use_tqdm=True,
-            )
-            results.append(result)
-            print(
-                f"[run {run_id + 1}/{sim_config.runs}] done, "
-                f"canonical_len={result.canonical_len}"
-            )
-    else:
-        print(
-            f"parallel mode enabled: requested_jobs={args.jobs}, "
-            f"effective_jobs={effective_jobs}"
-        )
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=effective_jobs
-        ) as executor:
-            futures = {
-                executor.submit(
-                    run_single,
-                    run_id,
-                    args,
-                    sim_config,
-                    three_pools,
-                    scenario,
-                    False,
-                ): run_id
-                for run_id in range(sim_config.runs)
-            }
-            with tqdm(
-                total=sim_config.runs,
-                desc="runs",
-                unit="run",
-                dynamic_ncols=True,
-            ) as progress_bar:
-                for future in concurrent.futures.as_completed(futures):
-                    run_id = futures[future]
-                    result = future.result()
-                    results.append(result)
-                    progress_bar.update(1)
-                    progress_bar.set_postfix_str(
-                        f"last_run={run_id + 1}, canonical_len={result.canonical_len}"
-                    )
-
+    print("[three] BetrayTolerated scenario completed")
     print(
-        "BetrayTolerated（三矿池）收益率均值 "
+        "BetrayTolerated (three-pool) mean revenue share "
         f"(runs={sim_config.runs}, blocks_per_run={sim_config.target_blocks_long})"
     )
-    for pool_id in pool_ids:
-        revenue = mean(r.shares_by_pool[pool_id] for r in results)
-        print(f"{pool_id}: {revenue:.6f}")
+    for pool in three_pools:
+        revenue = mean(result.shares_by_pool[pool.pool_id] for result in results)
+        print(f"{pool.pool_id}: {revenue:.6f}")
 
 
 if __name__ == "__main__":

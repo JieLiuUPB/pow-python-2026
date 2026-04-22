@@ -531,6 +531,24 @@ def run_experiments(
     raw: List[Dict[str, Any]] = []
     effective_jobs = min(jobs, len(tasks))
 
+    def _collect_with_executor(
+        executor_cls: type[concurrent.futures.Executor],
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        with executor_cls(max_workers=effective_jobs) as ex:
+            futures = [ex.submit(_run_task, *t) for t in tasks]
+            if tqdm is not None and show_progress:
+                with tqdm(
+                    total=len(futures), desc="runs", unit="run", dynamic_ncols=True
+                ) as bar:
+                    for f in concurrent.futures.as_completed(futures):
+                        rows.append(f.result())
+                        bar.update(1)
+            else:
+                for f in concurrent.futures.as_completed(futures):
+                    rows.append(f.result())
+        return rows
+
     if effective_jobs <= 1:
         it = tasks
         if tqdm is not None and show_progress:
@@ -539,21 +557,13 @@ def run_experiments(
             raw.append(_run_task(*task))
     else:
         try:
-            executor_cls = concurrent.futures.ProcessPoolExecutor
-        except Exception:
-            executor_cls = concurrent.futures.ThreadPoolExecutor
-        with executor_cls(max_workers=effective_jobs) as ex:
-            futures = [ex.submit(_run_task, *t) for t in tasks]
-            if tqdm is not None and show_progress:
-                with tqdm(
-                    total=len(futures), desc="runs", unit="run", dynamic_ncols=True
-                ) as bar:
-                    for f in concurrent.futures.as_completed(futures):
-                        raw.append(f.result())
-                        bar.update(1)
-            else:
-                for f in concurrent.futures.as_completed(futures):
-                    raw.append(f.result())
+            raw = _collect_with_executor(concurrent.futures.ProcessPoolExecutor)
+        except (OSError, PermissionError) as exc:
+            print(
+                "[warn] ProcessPoolExecutor unavailable "
+                f"({exc.__class__.__name__}: {exc}); falling back to threads."
+            )
+            raw = _collect_with_executor(concurrent.futures.ThreadPoolExecutor)
 
     raw.sort(key=lambda r: (float(r["p"]), int(r["run_id"])))
     return raw
@@ -632,7 +642,11 @@ def plot_results(
         print("[warn] matplotlib unavailable, skip plotting")
         return
 
-    plt_mod.style.use(["science", "ieee"])
+    try:
+        plt_mod.style.use(["science", "ieee", "no-latex"])
+    except Exception:
+        plt_mod.style.use(["science", "ieee"])
+    plt_mod.rcParams["text.usetex"] = False
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     p_vals = np.array([row["p"] for row in summary], dtype=float)
