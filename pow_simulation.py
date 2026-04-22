@@ -317,98 +317,118 @@ class TBWSimulation:
                 self._reset_attacker()
                 return
 
-            bn_pub = Block(
-                id=bn.id,
-                parent_id=bn.parent_id,
-                height=bn.height,
-                miner="A",
-                t_publish=self.t,
+            self._publish_block(
+                Block(
+                    id=bn.id,
+                    parent_id=bn.parent_id,
+                    height=bn.height,
+                    miner="A",
+                    t_publish=self.t,
+                )
             )
-            self._publish_block(bn_pub)
 
-            bn1_id = self._publish_new_block(
-                parent_id=bn.id, miner="A", t_publish=self.t
+            bn1 = PrivateBlock(
+                id=self._new_block_id(),
+                parent_id=bn.id,
+                height=bn.height + 1,
+                miner="A",
+                t_mine=self.t,
             )
+            self.attacker.base_height = bn.height
+            self.attacker.private_bn = bn1
+            self.attacker.deadline = self.t + self._w_star()
             self.counters.success_2blocks += 1
-            self._log("mine_A_withhold_success", bn_id=bn.id, bn1_id=bn1_id)
-            self._reset_attacker()
+            self._log("mine_A_withhold_chain_extend", bn_id=bn.id, bn1_id=bn1.id)
             return
 
         if state == "RACE":
-            race_tip_id = self.attacker.race_tip_id
-            if race_tip_id is None:
-                race_tip_id = self.canonical_tip_id
+            bn = self.attacker.private_bn
+            if bn is None:
+                self.counters.abort += 1
+                self._reset_attacker()
+                return
 
-            bnext_id = self._publish_new_block(
-                parent_id=race_tip_id, miner="A", t_publish=self.t
+            self._publish_block(
+                Block(
+                    id=bn.id,
+                    parent_id=bn.parent_id,
+                    height=bn.height,
+                    miner="A",
+                    t_publish=self.t,
+                )
             )
+            bnext_id = self._publish_new_block(parent_id=bn.id, miner="A", t_publish=self.t)
             self.counters.success_race += 1
             self._log("mine_A_race_success", block_id=bnext_id)
             self._reset_attacker()
             return
 
     def _handle_mine_H(self) -> None:
+        state = self.attacker.state
+        if state == "RACE":
+            race_tip_id = self.attacker.race_tip_id
+            if race_tip_id is None:
+                self.counters.abort += 1
+                self._reset_attacker()
+                return
+            hid = self._publish_new_block(
+                parent_id=race_tip_id, miner="H", t_publish=self.t
+            )
+            self.attacker.race_tip_id = hid
+            self.counters.abort += 1
+            self._log("mine_H_race_win", block_id=hid)
+            self._reset_attacker()
+            return
+
         parent_tip = self.canonical_tip_id
         hid = self._publish_new_block(parent_id=parent_tip, miner="H", t_publish=self.t)
         self._log("mine_H_publish", block_id=hid)
 
-        if self.attacker.state == "RACE" and self.attacker.base_height is not None:
-            canonical_tip = self.blocks_by_id[self.canonical_tip_id]
-            if canonical_tip.height >= self.attacker.base_height + 2:
-                if self.attacker.race_tip_id is not None and not self._is_descendant(
-                    self.canonical_tip_id, self.attacker.race_tip_id
-                ):
-                    self._log("race_lost")
-                    self._reset_attacker()
+        if state == "WITHHOLD":
+            bn = self.attacker.private_bn
+            if bn is None:
+                self.counters.abort += 1
+                self._reset_attacker()
+                return
+            hb = self.blocks_by_id[hid]
+            if hb.height == bn.height and hb.parent_id == bn.parent_id:
+                self.attacker.state = "RACE"
+                self.attacker.deadline = None
+                self.attacker.race_tip_id = hid
+                self._log("mine_H_trigger_race", block_id=hid)
 
     def _handle_release_A(self) -> None:
         if self.attacker.state != "WITHHOLD" or self.attacker.deadline is None:
             return
 
-        if (
-            self.blocks_by_id[self.canonical_tip_id].height
-            >= (self.attacker.base_height or 0) + 2
-        ):
-            self.counters.abort += 1
-            self._log("release_deadline_abort")
-            self._reset_attacker()
-            return
-
         bn = self.attacker.private_bn
         if bn is None:
+            self.counters.abort += 1
             self._reset_attacker()
             return
 
-        bn_pub = Block(
-            id=bn.id,
-            parent_id=bn.parent_id,
-            height=bn.height,
-            miner="A",
-            t_publish=self.t,
+        self._publish_block(
+            Block(
+                id=bn.id,
+                parent_id=bn.parent_id,
+                height=bn.height,
+                miner="A",
+                t_publish=self.t,
+            )
         )
-        self._publish_block(bn_pub)
         self.counters.release_only += 1
         self._log("release_bn", bn_id=bn.id)
-
-        if self.canonical_tip_id == bn.id:
-            self._log("release_no_race")
-            self._reset_attacker()
-            return
-
-        self.attacker.state = "RACE"
-        self.attacker.private_bn = None
-        self.attacker.deadline = None
-        self.attacker.race_tip_id = bn.id
-        self._log("release_enter_race", race_tip_id=bn.id)
+        self._reset_attacker()
 
     def _check_abort_condition(self) -> None:
-        if self.attacker.state != "WITHHOLD" or self.attacker.base_height is None:
-            return
-
-        canonical_height = self.blocks_by_id[self.canonical_tip_id].height
-        if canonical_height >= self.attacker.base_height + 2:
+        if self.attacker.state == "WITHHOLD" and self.attacker.private_bn is None:
             self.counters.abort += 1
-            self._log("withhold_abort_honest_advanced")
+            self._reset_attacker()
+            return
+        if self.attacker.state == "RACE" and (
+            self.attacker.private_bn is None or self.attacker.race_tip_id is None
+        ):
+            self.counters.abort += 1
             self._reset_attacker()
 
     def _maybe_adjust_difficulty(self) -> None:

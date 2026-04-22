@@ -310,47 +310,69 @@ class ChainWithholdSimulation:
             self.counters.chain_extensions += 1
             return
 
-        # ---- RACE: A wins ----
+        # ---- RACE: A mines on hidden B first -> reveal 2-block private chain ----
         if state == "RACE":
-            race_tip = self.attacker.race_tip_id or self.canonical_tip_id
-            self._publish_new_block(parent_id=race_tip, miner="A", t_publish=self.t)
+            bn = self.attacker.private_bn
+            if bn is None:
+                self.counters.abort += 1
+                self._reset_attacker()
+                return
+
+            self._publish_block(
+                Block(
+                    id=bn.id,
+                    parent_id=bn.parent_id,
+                    height=bn.height,
+                    miner="A",
+                    t_publish=self.t,
+                )
+            )
+            self._publish_new_block(parent_id=bn.id, miner="A", t_publish=self.t)
             self.counters.success_race += 1
             self._reset_attacker()
             return
 
     def _handle_mine_H(self) -> None:
-        self._publish_new_block(
-            parent_id=self.canonical_tip_id, miner="H", t_publish=self.t
-        )
+        state = self.attacker.state
 
-        # In RACE: check whether A lost (honest canonical is 2 ahead of
-        # the block A was racing on).
-        if self.attacker.state == "RACE" and self.attacker.base_height is not None:
-            canonical_h = self.blocks_by_id[self.canonical_tip_id].height
-            if canonical_h >= self.attacker.base_height + 2:
-                if self.attacker.race_tip_id is not None and not self._is_descendant(
-                    self.canonical_tip_id, self.attacker.race_tip_id
-                ):
-                    self._reset_attacker()
-
-    def _handle_release_A(self) -> None:
-        """Deadline reached: publish the withheld block (enter RACE or abort)."""
-        if self.attacker.state != "WITHHOLD" or self.attacker.deadline is None:
-            return
-
-        canonical_h = self.blocks_by_id[self.canonical_tip_id].height
-        if canonical_h >= (self.attacker.base_height or 0) + 2:
-            # Honest already 2 blocks past base; releasing can't win.
+        if state == "RACE":
+            race_tip = self.attacker.race_tip_id
+            if race_tip is None:
+                self.counters.abort += 1
+                self._reset_attacker()
+                return
+            self._publish_new_block(parent_id=race_tip, miner="H", t_publish=self.t)
             self.counters.abort += 1
             self._reset_attacker()
             return
 
+        new_h_id = self._publish_new_block(
+            parent_id=self.canonical_tip_id, miner="H", t_publish=self.t
+        )
+
+        if state == "WITHHOLD":
+            bn = self.attacker.private_bn
+            if bn is None:
+                self.counters.abort += 1
+                self._reset_attacker()
+                return
+            hb = self.blocks_by_id[new_h_id]
+            if hb.height == bn.height and hb.parent_id == bn.parent_id:
+                self.attacker.state = "RACE"
+                self.attacker.deadline = None
+                self.attacker.race_tip_id = new_h_id
+
+    def _handle_release_A(self) -> None:
+        """WITHHOLD deadline reached before race trigger: publish hidden B and reset."""
+        if self.attacker.state != "WITHHOLD" or self.attacker.deadline is None:
+            return
+
         bn = self.attacker.private_bn
         if bn is None:
+            self.counters.abort += 1
             self._reset_attacker()
             return
 
-        # Publish B_n at the deadline.
         self._publish_block(
             Block(
                 id=bn.id,
@@ -361,24 +383,17 @@ class ChainWithholdSimulation:
             )
         )
         self.counters.release_only += 1
-
-        if self.canonical_tip_id == bn.id:
-            # No competing honest block at same height; no race needed.
-            self._reset_attacker()
-            return
-
-        # Enter RACE.
-        self.attacker.state = "RACE"
-        self.attacker.private_bn = None
-        self.attacker.deadline = None
-        self.attacker.race_tip_id = bn.id
+        self._reset_attacker()
 
     def _check_abort_condition(self) -> None:
-        """Abort if honest chain is already 2 beyond the withheld block."""
-        if self.attacker.state != "WITHHOLD" or self.attacker.base_height is None:
+        """Lightweight sanity guard for impossible partial attacker state."""
+        if self.attacker.state == "WITHHOLD" and self.attacker.private_bn is None:
+            self.counters.abort += 1
+            self._reset_attacker()
             return
-        canonical_h = self.blocks_by_id[self.canonical_tip_id].height
-        if canonical_h >= self.attacker.base_height + 2:
+        if self.attacker.state == "RACE" and (
+            self.attacker.private_bn is None or self.attacker.race_tip_id is None
+        ):
             self.counters.abort += 1
             self._reset_attacker()
 
@@ -594,13 +609,13 @@ def write_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
 
 
 def _tbw_orphan_rate(p: float) -> float:
-    """Theoretical orphan rate for the original TBW strategy."""
-    return (1.0 - p) * p**2 / (1.0 + p)
+    """Theoretical orphan rate for TBW."""
+    return p* p * (1.0 - p) /(1+p* p * (1.0 - p))
 
 
 def _tbw_a_share(p: float) -> float:
-    """Theoretical A_share for original TBW: p*p*(2-p)/(1+p)."""
-    return 2 * p * (2.0 - p) - 1
+    """Theoretical A_share for TBW."""
+    return  (3.0 - 2*p) * p**2 
 
 
 # ---------------------------------------------------------------------------

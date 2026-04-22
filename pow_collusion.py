@@ -169,11 +169,10 @@ class CartelController:
         self.race_cartel_tip_id = None
         self.race_honest_tip_id = None
 
-    def enter_race(self, cartel_tip_id: int, honest_tip_id: int) -> None:
+    def enter_race(self, honest_tip_id: int) -> None:
         self.state = "RACE"
-        self.private_bn = None
         self.deadline = None
-        self.race_cartel_tip_id = cartel_tip_id
+        self.race_cartel_tip_id = None
         self.race_honest_tip_id = honest_tip_id
 
     def reset_round(self) -> None:
@@ -342,36 +341,19 @@ class CollusionSimulation:
         _ = self.get_new_canonical_blocks_since(old_tip, self.canonical_tip_id)
         return block
 
-    def _select_honest_tip_for_race(self, cartel_tip_id: int) -> Optional[int]:
-        cartel_height = self.blocks_by_id[cartel_tip_id].height
-        candidates = [
-            tip_id
-            for tip_id in self.tips
-            if tip_id != cartel_tip_id
-            and self.blocks_by_id[tip_id].height == cartel_height
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=self._canonical_key)
-
     def build_mining_processes(self) -> List[MiningProcess]:
         processes: List[MiningProcess] = []
 
-        tie_active = False
-        cartel_tip_id: Optional[int] = None
-        honest_tip_id: Optional[int] = None
+        race_active = False
+        race_honest_tip_id: Optional[int] = None
         if self.controller.state == "RACE":
-            cartel_tip_id = self.controller.race_cartel_tip_id
-            honest_tip_id = self.controller.race_honest_tip_id
+            race_honest_tip_id = self.controller.race_honest_tip_id
             if (
-                cartel_tip_id is not None
-                and honest_tip_id is not None
-                and cartel_tip_id in self.tips
-                and honest_tip_id in self.tips
-                and self.blocks_by_id[cartel_tip_id].height
-                == self.blocks_by_id[honest_tip_id].height
+                self.controller.private_bn is not None
+                and race_honest_tip_id is not None
+                and race_honest_tip_id in self.tips
             ):
-                tie_active = True
+                race_active = True
             else:
                 self.controller.reset_round()
 
@@ -394,40 +376,26 @@ class CollusionSimulation:
                         )
                     )
                     continue
-                if tie_active and cartel_tip_id is not None:
+                if race_active and self.controller.private_bn is not None:
                     processes.append(
                         MiningProcess(
                             pool_id=pool_id,
-                            target_tip_id=cartel_tip_id,
+                            target_tip_id=self.controller.private_bn.id,
                             lambda_rate=rate,
-                            target_kind="public",
+                            target_kind="private",
                         )
                     )
                     continue
 
-            if tie_active and cartel_tip_id is not None and honest_tip_id is not None:
-                if pool_id in self.controller.members:
-                    continue
-                rate_cartel = self.sim_config.gamma * rate
-                rate_honest = (1.0 - self.sim_config.gamma) * rate
-                if rate_cartel > 0.0:
-                    processes.append(
-                        MiningProcess(
-                            pool_id=pool_id,
-                            target_tip_id=cartel_tip_id,
-                            lambda_rate=rate_cartel,
-                            target_kind="public",
-                        )
+            if race_active and race_honest_tip_id is not None:
+                processes.append(
+                    MiningProcess(
+                        pool_id=pool_id,
+                        target_tip_id=race_honest_tip_id,
+                        lambda_rate=rate,
+                        target_kind="public",
                     )
-                if rate_honest > 0.0:
-                    processes.append(
-                        MiningProcess(
-                            pool_id=pool_id,
-                            target_tip_id=honest_tip_id,
-                            lambda_rate=rate_honest,
-                            target_kind="public",
-                        )
-                    )
+                )
             else:
                 processes.append(
                     MiningProcess(
@@ -468,23 +436,13 @@ class CollusionSimulation:
         )
 
     def check_abort_condition(self) -> None:
-        if self.controller.state != "WITHHOLD" or self.controller.base_height is None:
-            return
-        if self.canonical_height() >= self.controller.base_height + 2:
-            self.controller.reset_round()
-
-    def check_race_resolution(self, block: Block) -> None:
-        if self.controller.state != "RACE" or self.controller.base_height is None:
-            return
-        if block.height < self.controller.base_height + 2:
-            return
-
-        cartel_tip_id = self.controller.race_cartel_tip_id
-        honest_tip_id = self.controller.race_honest_tip_id
-        if cartel_tip_id is not None and self.is_descendant(block.id, cartel_tip_id):
+        if self.controller.state == "WITHHOLD" and self.controller.private_bn is None:
             self.controller.reset_round()
             return
-        if honest_tip_id is not None and self.is_descendant(block.id, honest_tip_id):
+        if self.controller.state == "RACE" and (
+            self.controller.private_bn is None
+            or self.controller.race_honest_tip_id is None
+        ):
             self.controller.reset_round()
 
     def break_cartel_dissolve(self) -> None:
@@ -555,8 +513,6 @@ class CollusionSimulation:
             self.opportunity_at_betray = self.opportunity_count_traitor
             self.canon_len_at_betray = self.canonical_height()
             self._apply_break_if_needed()
-            if self.controller.state == "RACE":
-                self.check_race_resolution(block)
             return
 
         p_cartel = self.controller.cartel_power(self.pool_rates)
@@ -575,23 +531,53 @@ class CollusionSimulation:
         )
 
     def _on_private_mine(self, miner_id: str) -> None:
-        if self.controller.state != "WITHHOLD" or self.controller.private_bn is None:
+        state = self.controller.state
+        if self.controller.private_bn is None:
+            if state in {"WITHHOLD", "RACE"}:
+                self.controller.reset_round()
             return
 
         private_bn = self.controller.private_bn
-        public_bn = self._publish_public_block(
-            parent_id=private_bn.parent_public_id,
-            miner_id=private_bn.miner_id,
-            t_publish=self.t,
-        )
-        _ = self._publish_public_block(
-            parent_id=public_bn.id,
-            miner_id=miner_id,
-            t_publish=self.t,
-        )
-        self.controller.reset_round()
+        if state == "WITHHOLD":
+            public_bn = self._publish_public_block(
+                parent_id=private_bn.parent_public_id,
+                miner_id=private_bn.miner_id,
+                t_publish=self.t,
+            )
+            p_cartel = self.controller.cartel_power(self.pool_rates)
+            new_private_bn = PrivateBlock(
+                id=self._new_private_id(),
+                parent_public_id=public_bn.id,
+                height=public_bn.height + 1,
+                miner_id=miner_id,
+                t_mine=self.t,
+            )
+            self.controller.start_withhold(
+                private_bn=new_private_bn,
+                base_height=public_bn.height,
+                deadline=self.t + self._w_star(p_cartel),
+            )
+            return
+
+        if state == "RACE":
+            public_bn = self._publish_public_block(
+                parent_id=private_bn.parent_public_id,
+                miner_id=private_bn.miner_id,
+                t_publish=self.t,
+            )
+            self._publish_public_block(
+                parent_id=public_bn.id,
+                miner_id=miner_id,
+                t_publish=self.t,
+            )
+            self.controller.reset_round()
 
     def _on_public_mine(self, miner_id: str, target_tip_id: int) -> None:
+        if self.controller.state == "RACE":
+            self._publish_public_block(parent_id=target_tip_id, miner_id=miner_id)
+            self.controller.reset_round()
+            return
+
         if (
             self.controller.state == "IDLE"
             and miner_id in self.controller.members
@@ -605,27 +591,29 @@ class CollusionSimulation:
             self.controller.state == "WITHHOLD"
             and miner_id not in self.controller.members
         ):
+            private_bn = self.controller.private_bn
+            if private_bn is None:
+                self.controller.reset_round()
+                return
+            if (
+                block.height == private_bn.height
+                and block.parent_id == private_bn.parent_public_id
+            ):
+                self.controller.enter_race(honest_tip_id=block.id)
+                return
             self.check_abort_condition()
-        if self.controller.state == "RACE":
-            self.check_race_resolution(block)
 
     def on_deadline(self) -> None:
         if self.controller.state != "WITHHOLD" or self.controller.private_bn is None:
             return
 
         private_bn = self.controller.private_bn
-        public_bn = self._publish_public_block(
+        self._publish_public_block(
             parent_id=private_bn.parent_public_id,
             miner_id=private_bn.miner_id,
             t_publish=self.t,
         )
-        honest_tip_id = self._select_honest_tip_for_race(public_bn.id)
-        if honest_tip_id is None:
-            self.controller.reset_round()
-        else:
-            self.controller.enter_race(
-                cartel_tip_id=public_bn.id, honest_tip_id=honest_tip_id
-            )
+        self.controller.reset_round()
 
     def _should_stop(self) -> bool:
         return self.canonical_height() >= self.sim_config.target_blocks_long
