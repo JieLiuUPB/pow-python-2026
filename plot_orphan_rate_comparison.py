@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import math
 import os
 from pathlib import Path
@@ -13,8 +14,11 @@ import matplotlib
 import numpy as np
 
 matplotlib.use("Agg", force=True)
-import scienceplots  # noqa: F401
 import matplotlib.pyplot as plt
+import scienceplots  # noqa: F401
+
+DEFAULT_TBW_SUMMARY = Path("results/chain_withhold_summary.csv")
+LEGACY_TBW_SUMMARY = Path("results/chain_withhold/summary.csv")
 
 
 def read_csv_rows(path: Path) -> List[Dict[str, str]]:
@@ -38,7 +42,7 @@ def write_csv_rows(path: Path, rows: Sequence[Dict[str, float]]) -> None:
 def theoretical_tbw_orphan_rate(p: float) -> float:
     if not (0.0 < p < 1.0):
         raise ValueError(f"p must be in (0, 1), got {p}")
-    return ((4.0 - 2.0 * p) * (1.0 - p) * p**3) / ((1.0 + p) ** 2)
+    return p * p * (1.0 - p) / (1.0 + p * p * (1.0 - p))
 
 
 def theoretical_selfish_orphan_rate(p: float) -> float:
@@ -55,6 +59,20 @@ def theoretical_selfish_orphan_rate(p: float) -> float:
     return 1.0 - p
 
 
+def _read_first_float(
+    row: Dict[str, str],
+    field_names: Sequence[str],
+    *,
+    path: Path,
+) -> float:
+    for field_name in field_names:
+        value = row.get(field_name)
+        if value not in (None, ""):
+            return float(value)
+    joined = ", ".join(field_names)
+    raise KeyError(f"Missing any of [{joined}] in {path}")
+
+
 def load_tbw_summary(path: Path) -> List[Dict[str, float]]:
     rows = read_csv_rows(path)
     output: List[Dict[str, float]] = []
@@ -63,8 +81,12 @@ def load_tbw_summary(path: Path) -> List[Dict[str, float]]:
         output.append(
             {
                 "p": p_value,
-                "sim_mean": float(row["orphan_rate_sim"]),
-                "sim_std": float(row["orphan_rate_std"]),
+                "sim_mean": _read_first_float(
+                    row,
+                    ("orphan_rate_mean", "orphan_rate_sim"),
+                    path=path,
+                ),
+                "sim_std": _read_first_float(row, ("orphan_rate_std",), path=path),
                 "theory": theoretical_tbw_orphan_rate(p_value),
             }
         )
@@ -129,53 +151,12 @@ def build_dense_curve(
     return p_grid, theory_values
 
 
-def plot_series_with_std_band(
-    ax: plt.Axes,
-    x: np.ndarray,
-    y: np.ndarray,
-    yerr: np.ndarray,
-    *,
-    color: str,
-    ecolor: str,
-    marker: str,
-    label: str,
-    band_alpha: float = 0.10,
-    zorder: int = 4,
-) -> None:
-    upper = y + yerr
-    lower = y - yerr
-    ax.errorbar(
-        x,
-        y,
-        yerr=yerr,
-        fmt=f"{marker}-",
-        capsize=4,
-        linewidth=2.2,
-        elinewidth=1.5,
-        color=color,
-        ecolor=ecolor,
-        markersize=3,
-        markerfacecolor="none",
-        markeredgewidth=1.5,
-        label=label,
-        zorder=zorder,
-    )
-    ax.fill_between(
-        x,
-        lower,
-        upper,
-        color=color,
-        alpha=band_alpha,
-        zorder=zorder - 1,
-    )
-    ax.plot(x, upper, color=color, linewidth=1.0, alpha=0.45, zorder=zorder - 1)
-    ax.plot(x, lower, color=color, linewidth=1.0, alpha=0.45, zorder=zorder - 1)
-
-
 def save_figure_bundle(base_path: Path, fig: plt.Figure) -> None:
     base_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(base_path.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    fig.savefig(base_path.with_suffix(".pdf"), format="pdf", dpi=300, bbox_inches="tight")
+    fig.savefig(
+        base_path.with_suffix(".pdf"), format="pdf", dpi=300, bbox_inches="tight"
+    )
 
 
 def plot_comparison(
@@ -184,9 +165,14 @@ def plot_comparison(
     output_path: Path,
     include_selfish_theory: bool,
 ) -> None:
-    plt.style.use(["science", "ieee"])
+    try:
+        plt.style.use(["science", "ieee", "no-latex"])
+    except Exception:
+        plt.style.use(["science", "ieee"])
+    plt.rcParams["text.usetex"] = False
 
     fig, ax = plt.subplots(figsize=(5.5, 4.125))
+    marker = itertools.cycle(("+", "x", "s", "v", "o", "D", "^"))
 
     tbw_p = np.array([row["p"] for row in tbw_rows], dtype=float)
     tbw_sim = np.array([row["sim_mean"] for row in tbw_rows], dtype=float)
@@ -207,53 +193,49 @@ def plot_comparison(
         theoretical_selfish_orphan_rate,
     )
 
-    plot_series_with_std_band(
-        ax,
+    ax.errorbar(
         tbw_p,
         tbw_sim,
-        tbw_std,
-        color="#155eef",
-        ecolor="#9ec5ff",
-        marker="o",
-        label="Block withholding simulation",
-        zorder=4,
+        yerr=tbw_std,
+        marker=next(marker),
+        markersize=3,
+        markerfacecolor="none",
+        capsize=4,
+        linewidth=1.5,
+        label="chain-withhold sim",
     )
     ax.plot(
         tbw_theory_p,
         tbw_theory_dense,
-        linestyle="--",
-        linewidth=2.0,
-        color="#0f766e",
-        label="Block withholding theory",
-        zorder=3,
+        linestyle=":",
+        linewidth=1.5,
+        label="TBW theory",
     )
-    plot_series_with_std_band(
-        ax,
+    ax.errorbar(
         selfish_p,
         selfish_sim,
-        selfish_std,
-        color="#b54708",
-        ecolor="#f7b27a",
-        marker="^",
-        label="Selfish mining simulation",
-        zorder=4,
+        yerr=selfish_std,
+        marker=next(marker),
+        markersize=3,
+        markerfacecolor="none",
+        capsize=4,
+        linewidth=1.5,
+        label="selfish mining sim",
     )
     if include_selfish_theory:
         ax.plot(
             selfish_theory_p,
             selfish_theory_dense,
-            linestyle=":",
-            linewidth=2.1,
-            color="#7a271a",
-            label="Selfish mining theory",
-            zorder=2,
+            linestyle="--",
+            linewidth=1.5,
+            label="selfish mining theory",
         )
 
-    ax.set_xlabel("Attacker hashrate p", fontsize=12)
+    ax.set_xlabel("Attacker hashrate $p$", fontsize=12)
     ax.set_ylabel("Orphan rate", fontsize=12)
     ax.tick_params(labelsize=10)
     ax.set_title("Orphan Rate Comparison")
-    ax.legend(loc="best", fontsize=10)
+    ax.legend(fontsize=10)
     ax.margins(x=0.02)
 
     all_values = [*tbw_sim, *tbw_theory_dense, *selfish_sim]
@@ -278,8 +260,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--simulation-summary",
-        default="results/scenario1_no_daa_by_blocks/summary.csv",
-        help="summary.csv produced by pow_simulation.py scenario 1",
+        default=str(DEFAULT_TBW_SUMMARY),
+        help="chain-withhold summary CSV; default falls back to results/chain_withhold/summary.csv",
     )
     parser.add_argument(
         "--selfish-summary",
@@ -311,15 +293,28 @@ def normalize_output_path(raw: str) -> Path:
     return path
 
 
+def resolve_tbw_summary_path(raw: str) -> Path:
+    path = Path(raw)
+    if path.exists() or path != DEFAULT_TBW_SUMMARY:
+        return path
+    if LEGACY_TBW_SUMMARY.exists():
+        return LEGACY_TBW_SUMMARY
+    return path
+
+
 def main() -> None:
     args = parse_args()
-    simulation_summary = Path(args.simulation_summary)
+    requested_simulation_summary = Path(args.simulation_summary)
+    simulation_summary = resolve_tbw_summary_path(args.simulation_summary)
     selfish_summary = Path(args.selfish_summary)
 
     if not simulation_summary.exists():
         raise FileNotFoundError(f"Missing simulation summary: {simulation_summary}")
     if not selfish_summary.exists():
         raise FileNotFoundError(f"Missing selfish summary: {selfish_summary}")
+
+    if simulation_summary != requested_simulation_summary:
+        print(f"[info] using legacy chain-withhold summary: {simulation_summary}")
 
     tbw_rows = load_tbw_summary(simulation_summary)
     selfish_rows = load_selfish_summary(selfish_summary)

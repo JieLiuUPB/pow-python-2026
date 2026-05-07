@@ -89,10 +89,11 @@ class EpochStat:
     t_start: float
     t_end: float
     t_total: float
+    count_basis: str
     difficulty_old: float
     difficulty_new: float
-    a_blocks_canonical: int
-    h_blocks_canonical: int
+    a_blocks_counted: int
+    h_blocks_counted: int
 
 
 @dataclass
@@ -143,6 +144,36 @@ class RunResult:
         }
 
 
+@dataclass
+class TimeCheckpointResult:
+    scenario: str
+    p: float
+    n: int
+    run_id: int
+    seed: int
+    t_checkpoint: float
+    A_blocks_canonical: int
+    H_blocks_canonical: int
+    canonical_len: int
+    final_difficulty_so_far: float
+    num_epochs_completed_so_far: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scenario": self.scenario,
+            "p": self.p,
+            "n": self.n,
+            "run_id": self.run_id,
+            "seed": self.seed,
+            "t_checkpoint": self.t_checkpoint,
+            "A_blocks_canonical": self.A_blocks_canonical,
+            "H_blocks_canonical": self.H_blocks_canonical,
+            "canonical_len": self.canonical_len,
+            "final_difficulty_so_far": self.final_difficulty_so_far,
+            "num_epochs_completed_so_far": self.num_epochs_completed_so_far,
+        }
+
+
 class TBWSimulation:
     def __init__(
         self,
@@ -160,6 +191,8 @@ class TBWSimulation:
         n_value: Optional[int] = None,
         log_events: bool = False,
         max_events: Optional[int] = None,
+        daa_count_basis: str = "canonical",
+        checkpoint_times: Optional[Sequence[float]] = None,
     ) -> None:
         self.T = float(T)
         self.p = float(p)
@@ -173,6 +206,11 @@ class TBWSimulation:
         self.run_id = run_id
         self.n_value = n_value
         self.max_events = max_events
+        if daa_count_basis not in {"canonical", "public"}:
+            raise ValueError(
+                f"daa_count_basis must be 'canonical' or 'public', got {daa_count_basis!r}"
+            )
+        self.daa_count_basis = daa_count_basis
         self.rng = np.random.default_rng(self.seed)
 
         self.t = 0.0
@@ -183,6 +221,7 @@ class TBWSimulation:
         self.tips: set[int] = {0}
         self.canonical_tip_id = 0
         self.canonical_chain_ids: List[int] = []
+        self.published_block_ids: List[int] = []
         self._next_block_id = 1
 
         self.attacker = AttackerState()
@@ -194,6 +233,55 @@ class TBWSimulation:
 
         self.log_events = log_events
         self.event_log: List[Dict[str, Any]] = []
+        self.checkpoint_times = (
+            sorted(float(t) for t in checkpoint_times) if checkpoint_times else []
+        )
+        self._next_checkpoint_index = 0
+        self.checkpoint_results: List[TimeCheckpointResult] = []
+
+    def _checkpoint_n_value(self, t_checkpoint: float) -> int:
+        base_horizon = self.epoch_len * self.T
+        return int(round(t_checkpoint / base_horizon))
+
+    def _build_checkpoint_result(self, t_checkpoint: float) -> TimeCheckpointResult:
+        a_canonical = sum(
+            1 for bid in self.canonical_chain_ids if self.blocks_by_id[bid].miner == "A"
+        )
+        h_canonical = sum(
+            1 for bid in self.canonical_chain_ids if self.blocks_by_id[bid].miner == "H"
+        )
+        return TimeCheckpointResult(
+            scenario=self.scenario,
+            p=self.p,
+            n=self._checkpoint_n_value(t_checkpoint),
+            run_id=self.run_id,
+            seed=self.seed,
+            t_checkpoint=t_checkpoint,
+            A_blocks_canonical=a_canonical,
+            H_blocks_canonical=h_canonical,
+            canonical_len=len(self.canonical_chain_ids),
+            final_difficulty_so_far=self.difficulty,
+            num_epochs_completed_so_far=self.epochs_completed,
+        )
+
+    def _capture_pending_checkpoints_before(self, next_event_time: float) -> None:
+        while (
+            self._next_checkpoint_index < len(self.checkpoint_times)
+            and self.checkpoint_times[self._next_checkpoint_index]
+            < next_event_time - EPS
+        ):
+            t_checkpoint = self.checkpoint_times[self._next_checkpoint_index]
+            self.checkpoint_results.append(self._build_checkpoint_result(t_checkpoint))
+            self._next_checkpoint_index += 1
+
+    def _capture_due_checkpoints(self) -> None:
+        while (
+            self._next_checkpoint_index < len(self.checkpoint_times)
+            and self.checkpoint_times[self._next_checkpoint_index] <= self.t + EPS
+        ):
+            t_checkpoint = self.checkpoint_times[self._next_checkpoint_index]
+            self.checkpoint_results.append(self._build_checkpoint_result(t_checkpoint))
+            self._next_checkpoint_index += 1
 
     def _log(self, event: str, **kwargs: Any) -> None:
         if not self.log_events:
@@ -214,7 +302,7 @@ class TBWSimulation:
         return bid
 
     def _w_star(self) -> float:
-        return 10.0 * self.T
+        return (10 - 60 * (1 - self.difficulty)) * self.T
 
     def _get_chain_tip_id(self) -> int:
         def key_func(block_id: int) -> tuple[int, float, int]:
@@ -244,6 +332,7 @@ class TBWSimulation:
 
     def _publish_block(self, block: Block) -> None:
         self.blocks_by_id[block.id] = block
+        self.published_block_ids.append(block.id)
         self.tips.add(block.id)
 
         parent = block.parent_id
@@ -437,13 +526,15 @@ class TBWSimulation:
         if not self.enable_daa:
             return
 
-        while (
-            len(self.canonical_chain_ids)
-            >= (self.epochs_completed + 1) * self.epoch_len
-        ):
+        if self.daa_count_basis == "canonical":
+            daa_block_ids = self.canonical_chain_ids
+        else:
+            daa_block_ids = self.published_block_ids
+
+        while len(daa_block_ids) >= (self.epochs_completed + 1) * self.epoch_len:
             epoch_index = self.epochs_completed + 1
             boundary_len = epoch_index * self.epoch_len
-            boundary_block_id = self.canonical_chain_ids[boundary_len - 1]
+            boundary_block_id = daa_block_ids[boundary_len - 1]
             boundary_time = self.blocks_by_id[boundary_block_id].t_publish
 
             t_total = max(boundary_time - self.t_epoch_start, EPS)
@@ -451,9 +542,7 @@ class TBWSimulation:
             d_new = d_old * (self.epoch_len * self.T) / t_total
             self.difficulty = d_new
 
-            segment = self.canonical_chain_ids[
-                (epoch_index - 1) * self.epoch_len : boundary_len
-            ]
+            segment = daa_block_ids[(epoch_index - 1) * self.epoch_len : boundary_len]
             a_blocks = sum(1 for bid in segment if self.blocks_by_id[bid].miner == "A")
             h_blocks = sum(1 for bid in segment if self.blocks_by_id[bid].miner == "H")
 
@@ -468,15 +557,17 @@ class TBWSimulation:
                     t_start=self.t_epoch_start,
                     t_end=boundary_time,
                     t_total=t_total,
+                    count_basis=self.daa_count_basis,
                     difficulty_old=d_old,
                     difficulty_new=d_new,
-                    a_blocks_canonical=a_blocks,
-                    h_blocks_canonical=h_blocks,
+                    a_blocks_counted=a_blocks,
+                    h_blocks_counted=h_blocks,
                 )
             )
             self._log(
                 "daa_adjust",
                 epoch_index=epoch_index,
+                count_basis=self.daa_count_basis,
                 t_total=t_total,
                 d_old=d_old,
                 d_new=d_new,
@@ -566,12 +657,14 @@ class TBWSimulation:
             )
 
             t_next = min(t_a, t_h, t_r)
+            self._capture_pending_checkpoints_before(t_next)
             if (
                 self.mode == "by_time"
                 and self.t_end is not None
                 and t_next > self.t_end
             ):
                 self.t = self.t_end
+                self._capture_due_checkpoints()
                 break
 
             self.t = t_next
@@ -584,6 +677,7 @@ class TBWSimulation:
 
             self._check_abort_condition()
             self._maybe_adjust_difficulty()
+            self._capture_due_checkpoints()
             events += 1
 
         return self._summarize(), self.epoch_stats, self.event_log
@@ -637,7 +731,14 @@ def _run_tbw_task(
     n_value: Optional[int],
     log_events: bool,
     max_events: Optional[int],
-) -> tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]:
+    daa_count_basis: str,
+    checkpoint_times: Optional[Sequence[float]],
+) -> tuple[
+    RunResult,
+    List[EpochStat],
+    List[Dict[str, Any]],
+    List[TimeCheckpointResult],
+]:
     sim = TBWSimulation(
         T=T,
         p=p,
@@ -652,8 +753,11 @@ def _run_tbw_task(
         n_value=n_value,
         log_events=log_events,
         max_events=max_events,
+        daa_count_basis=daa_count_basis,
+        checkpoint_times=checkpoint_times,
     )
-    return sim.run()
+    run_result, epoch_stats, event_log = sim.run()
+    return run_result, epoch_stats, event_log, sim.checkpoint_results
 
 
 def _collect_parallel_tbw_results(
@@ -672,6 +776,8 @@ def _collect_parallel_tbw_results(
             Optional[int],
             bool,
             Optional[int],
+            str,
+            Optional[Sequence[float]],
         ]
     ],
     *,
@@ -679,8 +785,22 @@ def _collect_parallel_tbw_results(
     max_workers: int,
     show_progress: bool,
     progress_desc: str,
-) -> List[tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]]:
-    results: List[tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]] = []
+) -> List[
+    tuple[
+        RunResult,
+        List[EpochStat],
+        List[Dict[str, Any]],
+        List[TimeCheckpointResult],
+    ]
+]:
+    results: List[
+        tuple[
+            RunResult,
+            List[EpochStat],
+            List[Dict[str, Any]],
+            List[TimeCheckpointResult],
+        ]
+    ] = []
     with executor_cls(max_workers=max_workers) as executor:
         futures = [executor.submit(_run_tbw_task, *task) for task in tasks]
         if tqdm is None or not show_progress:
@@ -715,13 +835,22 @@ def _execute_tbw_tasks(
             Optional[int],
             bool,
             Optional[int],
+            str,
+            Optional[Sequence[float]],
         ]
     ],
     *,
     jobs: int,
     show_progress: bool,
     progress_desc: str,
-) -> List[tuple[RunResult, List[EpochStat], List[Dict[str, Any]]]]:
+) -> List[
+    tuple[
+        RunResult,
+        List[EpochStat],
+        List[Dict[str, Any]],
+        List[TimeCheckpointResult],
+    ]
+]:
     effective_jobs = min(jobs, len(tasks))
     if jobs > effective_jobs:
         print(
@@ -754,81 +883,6 @@ def _execute_tbw_tasks(
         )
 
 
-def scenario2(
-    *,
-    T: float,
-    runs: int,
-    epoch_len: int,
-    base_seed: int,
-    results_root: Path,
-    jobs: int,
-    show_progress: bool,
-) -> tuple[List[RunResult], List[Dict[str, Any]]]:
-    p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
-    scenario_name = "scenario2_no_daa_by_time"
-    out_dir = results_root / scenario_name
-    ensure_dir(out_dir)
-
-    t_end = epoch_len * T
-    tasks = [
-        (
-            T,
-            p,
-            derive_seed(base_seed, scenario_name, p, run_id, None),
-            "by_time",
-            t_end,
-            None,
-            False,
-            epoch_len,
-            scenario_name,
-            run_id,
-            None,
-            False,
-            None,
-        )
-        for p in p_values
-        for run_id in range(runs)
-    ]
-    task_results = _execute_tbw_tasks(
-        tasks,
-        jobs=jobs,
-        show_progress=show_progress,
-        progress_desc="scenario2 runs",
-    )
-    raw_results = [run_result for run_result, _, _ in task_results]
-    raw_results.sort(key=lambda r: (float(r.p), int(r.run_id)))
-
-    raw_rows = [r.to_dict() for r in raw_results]
-    raw_fields = list(raw_rows[0].keys()) if raw_rows else []
-    write_csv(out_dir / "raw_runs.csv", raw_rows, raw_fields)
-
-    summary_rows: List[Dict[str, Any]] = []
-    baseline_blocks = float(epoch_len)
-    for p in p_values:
-        values = [
-            r.A_blocks_canonical - p * baseline_blocks
-            for r in raw_results
-            if abs(r.p - p) < 1e-12
-        ]
-        m, s = aggregate_metric(values)
-        summary_rows.append(
-            {
-                "p": p,
-                "metric": "A_blocks_canonical_minus_p_times_2016",
-                "metric_mean": m,
-                "metric_std": s,
-                "runs": runs,
-            }
-        )
-
-    write_csv(
-        out_dir / "summary.csv",
-        summary_rows,
-        ["p", "metric", "metric_mean", "metric_std", "runs"],
-    )
-    return raw_results, summary_rows
-
-
 def scenario3(
     *,
     T: float,
@@ -839,59 +893,76 @@ def scenario3(
     jobs: int,
     show_progress: bool,
 ) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
-    p_values = [0.55, 0.65, 0.75, 0.85]
-    n_values = [1, 2, 3, 5]
-    scenario_name = "scenario3_daa_by_time"
-    out_dir = results_root / scenario_name
-    ensure_dir(out_dir)
-
-    tasks = []
-    for p in p_values:
-        for n_value in n_values:
-            t_end = n_value * epoch_len * T
-            for run_id in range(runs):
-                tasks.append(
-                    (
-                        T,
-                        p,
-                        derive_seed(base_seed, scenario_name, p, run_id, n_value),
-                        "by_time",
-                        t_end,
-                        None,
-                        True,
-                        epoch_len,
-                        scenario_name,
-                        run_id,
-                        n_value,
-                        False,
-                        None,
-                    )
-                )
-
-    task_results = _execute_tbw_tasks(
-        tasks,
+    return run_fixed_time_daa_scenario(
+        T=T,
+        runs=runs,
+        epoch_len=epoch_len,
+        base_seed=base_seed,
+        results_root=results_root,
         jobs=jobs,
         show_progress=show_progress,
+        scenario_name="scenario3_daa_by_time",
+        daa_count_basis="canonical",
         progress_desc="scenario3 runs",
     )
 
-    raw_results: List[RunResult] = []
-    epoch_rows: List[EpochStat] = []
-    for run_result, epochs, _ in task_results:
-        raw_results.append(run_result)
-        epoch_rows.extend(epochs)
 
-    raw_results.sort(
-        key=lambda r: (float(r.p), -1 if r.n is None else int(r.n), int(r.run_id))
+def build_fixed_time_ratio_summary_rows(
+    *,
+    checkpoint_results: Sequence[TimeCheckpointResult],
+    p_values: Sequence[float],
+    n_values: Sequence[int],
+    metric_name: str,
+    runs: int,
+) -> List[Dict[str, Any]]:
+    summary_rows: List[Dict[str, Any]] = []
+    for p in p_values:
+        for n_value in n_values:
+            baseline = p * n_value * 2016.0
+            values = [
+                checkpoint.A_blocks_canonical / baseline
+                for checkpoint in checkpoint_results
+                if abs(checkpoint.p - p) < 1e-12 and checkpoint.n == n_value
+            ]
+            m, s = aggregate_metric(values)
+            summary_rows.append(
+                {
+                    "p": p,
+                    "n": n_value,
+                    "metric": metric_name,
+                    "metric_mean": m,
+                    "metric_std": s,
+                    "runs": runs,
+                }
+            )
+    return summary_rows
+
+
+def scenario4(
+    *,
+    T: float,
+    runs: int,
+    epoch_len: int,
+    base_seed: int,
+    results_root: Path,
+    jobs: int,
+    show_progress: bool,
+) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
+    return run_fixed_time_daa_scenario(
+        T=T,
+        runs=runs,
+        epoch_len=epoch_len,
+        base_seed=base_seed,
+        results_root=results_root,
+        jobs=jobs,
+        show_progress=show_progress,
+        scenario_name="scenario4_public_daa_by_time",
+        daa_count_basis="public",
+        progress_desc="scenario4 runs",
     )
-    epoch_rows.sort(
-        key=lambda e: (float(e.p), int(e.n), int(e.run_id), int(e.epoch_index))
-    )
 
-    raw_rows = [r.to_dict() for r in raw_results]
-    raw_fields = list(raw_rows[0].keys()) if raw_rows else []
-    write_csv(out_dir / "raw_runs.csv", raw_rows, raw_fields)
 
+def write_epoch_stats_csv(out_dir: Path, epoch_rows: Sequence[EpochStat]) -> None:
     epoch_dict_rows = [
         {
             "scenario": e.scenario,
@@ -903,10 +974,11 @@ def scenario3(
             "t_start": e.t_start,
             "t_end": e.t_end,
             "t_total": e.t_total,
+            "count_basis": e.count_basis,
             "difficulty_old": e.difficulty_old,
             "difficulty_new": e.difficulty_new,
-            "a_blocks_canonical": e.a_blocks_canonical,
-            "h_blocks_canonical": e.h_blocks_canonical,
+            "a_blocks_counted": e.a_blocks_counted,
+            "h_blocks_counted": e.h_blocks_counted,
         }
         for e in epoch_rows
     ]
@@ -923,35 +995,119 @@ def scenario3(
             "t_start",
             "t_end",
             "t_total",
+            "count_basis",
             "difficulty_old",
             "difficulty_new",
-            "a_blocks_canonical",
-            "h_blocks_canonical",
+            "a_blocks_counted",
+            "h_blocks_counted",
         ]
     )
     write_csv(out_dir / "epoch_stats.csv", epoch_dict_rows, epoch_fields)
 
-    summary_rows: List[Dict[str, Any]] = []
+
+def write_checkpoint_csv(
+    out_dir: Path, checkpoint_rows: Sequence[TimeCheckpointResult]
+) -> None:
+    checkpoint_dict_rows = [row.to_dict() for row in checkpoint_rows]
+    checkpoint_fields = (
+        list(checkpoint_dict_rows[0].keys())
+        if checkpoint_dict_rows
+        else [
+            "scenario",
+            "p",
+            "n",
+            "run_id",
+            "seed",
+            "t_checkpoint",
+            "A_blocks_canonical",
+            "H_blocks_canonical",
+            "canonical_len",
+            "final_difficulty_so_far",
+            "num_epochs_completed_so_far",
+        ]
+    )
+    write_csv(out_dir / "checkpoints.csv", checkpoint_dict_rows, checkpoint_fields)
+
+
+def run_fixed_time_daa_scenario(
+    *,
+    T: float,
+    runs: int,
+    epoch_len: int,
+    base_seed: int,
+    results_root: Path,
+    jobs: int,
+    show_progress: bool,
+    scenario_name: str,
+    daa_count_basis: str,
+    progress_desc: str,
+) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
+    p_values = [0.65, 0.75]
+    n_values = [2, 5, 10, 20]
+    out_dir = results_root / scenario_name
+    ensure_dir(out_dir)
+    max_n = max(n_values)
+    checkpoint_times = [n_value * epoch_len * T for n_value in n_values]
+
+    tasks = []
     for p in p_values:
-        for n_value in n_values:
-            baseline = p * n_value * epoch_len
-            values = [
-                r.A_blocks_canonical / baseline
-                for r in raw_results
-                if abs(r.p - p) < 1e-12 and r.n == n_value
-            ]
-            m, s = aggregate_metric(values)
-            summary_rows.append(
-                {
-                    "p": p,
-                    "n": n_value,
-                    "metric": "A_blocks_canonical_over_pn2016",
-                    "metric_mean": m,
-                    "metric_std": s,
-                    "runs": runs,
-                }
+        t_end = max_n * epoch_len * T
+        for run_id in range(runs):
+            tasks.append(
+                (
+                    T,
+                    p,
+                    derive_seed(base_seed, scenario_name, p, run_id, max_n),
+                    "by_time",
+                    t_end,
+                    None,
+                    True,
+                    epoch_len,
+                    scenario_name,
+                    run_id,
+                    max_n,
+                    False,
+                    None,
+                    daa_count_basis,
+                    checkpoint_times,
+                )
             )
 
+    task_results = _execute_tbw_tasks(
+        tasks,
+        jobs=jobs,
+        show_progress=show_progress,
+        progress_desc=progress_desc,
+    )
+
+    raw_results: List[RunResult] = []
+    epoch_rows: List[EpochStat] = []
+    checkpoint_rows: List[TimeCheckpointResult] = []
+    for run_result, epochs, _, checkpoints in task_results:
+        raw_results.append(run_result)
+        epoch_rows.extend(epochs)
+        checkpoint_rows.extend(checkpoints)
+
+    raw_results.sort(key=lambda r: (float(r.p), int(r.run_id)))
+    epoch_rows.sort(
+        key=lambda e: (float(e.p), int(e.n), int(e.run_id), int(e.epoch_index))
+    )
+    checkpoint_rows.sort(key=lambda c: (float(c.p), int(c.n), int(c.run_id)))
+
+    raw_rows = [r.to_dict() for r in raw_results]
+    raw_fields = list(raw_rows[0].keys()) if raw_rows else []
+    write_csv(out_dir / "raw_runs.csv", raw_rows, raw_fields)
+
+    write_epoch_stats_csv(out_dir, epoch_rows)
+    write_checkpoint_csv(out_dir, checkpoint_rows)
+
+    summary_rows = build_fixed_time_ratio_summary_rows(
+        checkpoint_results=checkpoint_rows,
+        p_values=p_values,
+        n_values=n_values,
+        metric_name="A_blocks_canonical_fixedtime_n_round_over_pn2016",
+        runs=runs,
+    )
     write_csv(
         out_dir / "summary.csv",
         summary_rows,
@@ -987,72 +1143,13 @@ def save_plot_data(fig_dir: Path, stem: str, rows: Sequence[Dict[str, Any]]) -> 
     )
 
 
-def plot_scenario2(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
-    plt_mod = get_plt()
-    if plt_mod is None:
-        return
-    ensure_dir(fig_dir)
-    apply_plot_theme(plt_mod)
-
-    rows = sorted(summary_rows, key=lambda r: r["p"])
-    p_vals = np.array([row["p"] for row in rows], dtype=float)
-    means = np.array([row["metric_mean"] for row in rows], dtype=float)
-    stds = np.array([row["metric_std"] for row in rows], dtype=float)
-
-    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
-    ax.errorbar(
-        p_vals,
-        means,
-        yerr=stds,
-        fmt="o-",
-        color="#0f766e",
-        ecolor="#7bd4ce",
-        linewidth=2.2,
-        elinewidth=1.5,
-        capsize=4,
-        markersize=3,
-        markerfacecolor="none",
-        markeredgewidth=1.6,
-    )
-    ax.fill_between(
-        p_vals,
-        means,
-        0.0,
-        where=means <= 0.0,
-        color="#f97316",
-        alpha=0.12,
-        interpolate=True,
-        label="delta <= 0 region",
-    )
-    ax.axhline(
-        0.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 0"
-    )
-    ax.set_xlabel("Attacker hashrate p", fontsize=12)
-    ax.set_ylabel("mean(A_blocks_canonical - p*2016)", fontsize=12)
-    ax.tick_params(labelsize=10)
-    ax.set_title("Scenario 2: Absolute Gain Delta (No DAA, fixed time = 2016T)")
-    ax.legend(loc="lower left", fontsize=10)
-    ax.margins(x=0.02)
-    ax.grid(True, linestyle="--", alpha=0.6)
-
-    fig.tight_layout()
-    save_figure_bundle(fig_dir, "s2_absolute_delta", fig)
-    plt_mod.show()
-    plt_mod.close(fig)
-
-    data_rows = [
-        {
-            "p": float(p_vals[i]),
-            "metric_mean": float(means[i]),
-            "metric_std": float(stds[i]),
-            "baseline_delta": 0.0,
-        }
-        for i in range(len(p_vals))
-    ]
-    save_plot_data(fig_dir, "s2_absolute_delta", data_rows)
-
-
-def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
+def plot_fixed_time_ratio(
+    summary_rows: List[Dict[str, Any]],
+    fig_dir: Path,
+    *,
+    stem: str,
+    title: str,
+) -> None:
     plt_mod = get_plt()
     if plt_mod is None:
         return
@@ -1103,18 +1200,38 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
     )
     ax.set_xlabel("Time horizon multiplier n", fontsize=12)
-    ax.set_ylabel("mean( A_blocks_canonical / (p*n*2016) )", fontsize=12)
+    ax.set_ylabel(
+        "mean( A_blocks_canonical_fixedtime_n_round / (p*n*2016) )", fontsize=12
+    )
     ax.tick_params(labelsize=10)
-    ax.set_title("Scenario 3: Long-Term Ratio with DAA")
+    ax.set_title(title)
     ax.legend(loc="best", ncols=2, fontsize=10)
     ax.margins(x=0.03)
     ax.grid(True, linestyle="--", alpha=0.6)
 
     fig.tight_layout()
-    save_figure_bundle(fig_dir, "s3_longterm_ratio", fig)
+    save_figure_bundle(fig_dir, stem, fig)
     plt_mod.show()
     plt_mod.close(fig)
-    save_plot_data(fig_dir, "s3_longterm_ratio", plot_data_rows)
+    save_plot_data(fig_dir, stem, plot_data_rows)
+
+
+def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
+    plot_fixed_time_ratio(
+        summary_rows,
+        fig_dir,
+        stem="s3_fixedtime_ratio",
+        title="Scenario 3: Fixed-Time Ratio with Canonical-Chain DAA",
+    )
+
+
+def plot_scenario4(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
+    plot_fixed_time_ratio(
+        summary_rows,
+        fig_dir,
+        stem="s4_fixedtime_ratio",
+        title="Scenario 4: Fixed-Time Ratio with Public-Block DAA",
+    )
 
 
 def write_config_summary(
@@ -1150,10 +1267,10 @@ def write_config_summary(
 
 def parse_scenarios(raw: str) -> List[str]:
     if raw.strip().lower() == "all":
-        return ["2", "3"]
+        return ["3", "4"]
     parts = [x.strip() for x in raw.split(",") if x.strip()]
     for p in parts:
-        if p not in {"2", "3"}:
+        if p not in {"3", "4"}:
             raise ValueError(f"Invalid scenario selector: {p}")
     return parts
 
@@ -1161,7 +1278,7 @@ def parse_scenarios(raw: str) -> List[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="TBW PoW simulation runner")
     parser.add_argument(
-        "--scenarios", default="all", help="all or comma-separated subset of 2,3"
+        "--scenarios", default="all", help="all or comma-separated subset of 3,4"
     )
     parser.add_argument("--T", type=float, default=10.0, help="Target block interval")
     parser.add_argument(
@@ -1209,20 +1326,8 @@ def main() -> None:
     print("  gamma=0, private lead<=1, Poisson mining, tie by earlier t_publish")
     print("  DAA formula: D_new = D_old * (2016*T) / T_total")
 
-    s2_summary: List[Dict[str, Any]] = []
     s3_summary: List[Dict[str, Any]] = []
-    if "2" in scenarios:
-        _, s2_summary = scenario2(
-            T=args.T,
-            runs=args.runs,
-            epoch_len=args.epoch_len,
-            base_seed=args.base_seed,
-            results_root=results_dir,
-            jobs=args.jobs,
-            show_progress=not args.no_progress,
-        )
-        print("Scenario 2 completed")
-
+    s4_summary: List[Dict[str, Any]] = []
     if "3" in scenarios:
         _, _, s3_summary = scenario3(
             T=args.T,
@@ -1235,14 +1340,26 @@ def main() -> None:
         )
         print("Scenario 3 completed")
 
+    if "4" in scenarios:
+        _, _, s4_summary = scenario4(
+            T=args.T,
+            runs=args.runs,
+            epoch_len=args.epoch_len,
+            base_seed=args.base_seed,
+            results_root=results_dir,
+            jobs=args.jobs,
+            show_progress=not args.no_progress,
+        )
+        print("Scenario 4 completed")
+
     if not args.skip_plots:
         if get_plt() is None:
             print("matplotlib unavailable, skipped plotting")
         else:
-            if s2_summary:
-                plot_scenario2(s2_summary, figures_dir)
             if s3_summary:
                 plot_scenario3(s3_summary, figures_dir)
+            if s4_summary:
+                plot_scenario4(s4_summary, figures_dir)
             print("Figures saved")
 
 

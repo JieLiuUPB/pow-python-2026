@@ -620,12 +620,12 @@ def write_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
 
 def _tbw_orphan_rate(p: float) -> float:
     """Theoretical orphan rate for TBW."""
-    return p* p * (1.0 - p) /(1+p* p * (1.0 - p))
+    return p * p * (1.0 - p) / (1 + p * p * (1.0 - p))
 
 
 def _tbw_a_share(p: float) -> float:
-    """Theoretical A_share for TBW."""
-    return  (3.0 - 2*p) * p**2 
+    """Theoretical attacker-block rate for TBW."""
+    return (3.0 - 2 * p) * p**2
 
 
 # ---------------------------------------------------------------------------
@@ -742,10 +742,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90,0.95",
     )
     parser.add_argument("--T", type=float, default=10.0)
-    parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--repeats", type=int, default=100)
     parser.add_argument("--target-blocks", type=int, default=2016)
     parser.add_argument("--base-seed", type=int, default=2026)
-    parser.add_argument("--jobs", type=int, default=10)
+    parser.add_argument("--jobs", type=int, default=30)
     parser.add_argument("--results-dir", default="results/chain_withhold")
     parser.add_argument("--figures-dir", default="figures/chain_withhold")
     parser.add_argument("--skip-plots", action="store_true")
