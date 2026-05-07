@@ -202,7 +202,7 @@ def plot_comparison(
         markerfacecolor="none",
         capsize=4,
         linewidth=1.5,
-        label="chain-withhold sim",
+        label="TBW sim",
     )
     ax.plot(
         tbw_theory_p,

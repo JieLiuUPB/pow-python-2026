@@ -5,6 +5,7 @@ runs = 10
 epoch_len = 2016
 base_seed = 2026
 jobs = 30
+selfish_gamma = 0.0
 gamma = 0
 DAA: D_new = D_old * (2016*T) / T_total
 w*(p, D) = 10*T

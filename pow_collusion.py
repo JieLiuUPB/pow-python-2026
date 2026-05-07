@@ -993,11 +993,34 @@ def summarize_results(
     return summary
 
 
+def build_display_pool_labels(
+    pool_ids: Sequence[str],
+    traitor_id: str,
+) -> List[str]:
+    labels: List[str] = []
+    loyal_index = 1
+    use_numbered_loyals = len(pool_ids) > 3
+
+    for pool_id in pool_ids:
+        if pool_id == "h":
+            labels.append("honest")
+        elif pool_id == traitor_id:
+            labels.append("traitor")
+        elif use_numbered_loyals:
+            labels.append(f"loyal_{loyal_index}")
+            loyal_index += 1
+        else:
+            labels.append("loyal")
+
+    return labels
+
+
 def plot_summary(
     summary_rows: Sequence[Dict[str, Any]],
     output_png: Path,
     output_pdf: Path,
     title: str,
+    display_pool_labels: Optional[Sequence[str]] = None,
 ) -> None:
     try:
         import matplotlib
@@ -1017,13 +1040,34 @@ def plot_summary(
 
     pool_ids = [str(row["pool_id"]) for row in summary_rows]
     x = np.arange(len(pool_ids))
+    x_tick_labels = (
+        list(display_pool_labels) if display_pool_labels is not None else pool_ids
+    )
 
     series = [
-        ("hashrate_p", "hashrate_p"),
-        ("AlwaysCartel_share_mean", "AlwaysCartel"),
-        ("BetrayBreakShort_share_mean", "BetrayBreakShort"),
-        ("BetrayThenBreak_share_mean", "BetrayThenBreak"),
-        ("BetrayTolerated_share_mean", "BetrayTolerated"),
+        ("hashrate_p", "Baseline(Hashrate)", "#1f77b4", "", "black"),
+        ("AlwaysCartel_share_mean", "NoBetray", "#2ca02c", "", "black"),
+        (
+            "BetrayBreakShort_share_mean",
+            "Betray&NoTolerance",
+            "#f28b82",
+            "",
+            "black",
+        ),
+        (
+            "BetrayThenBreak_share_mean",
+            "Betray&ShortTolerance",
+            "#c62828",
+            "",
+            "black",
+        ),
+        (
+            "BetrayTolerated_share_mean",
+            "Betray&AlwaysTolerant",
+            "#000000",
+            "",
+            "white",
+        ),
     ]
 
     hashrates = [float(row["hashrate_p"]) for row in summary_rows]
@@ -1035,13 +1079,22 @@ def plot_summary(
 
     width = 0.12
     fig, ax = plt.subplots(figsize=(5.5, 4.125))
-    for idx, (key, label) in enumerate(series):
+    for idx, (key, label, color, hatch, edgecolor) in enumerate(series):
         values = [float(row[key]) for row in summary_rows]
         offset = (idx - 2) * width
-        ax.bar(x + offset, values, width=width, label=label)
+        ax.bar(
+            x + offset,
+            values,
+            width=width,
+            label=label,
+            color=color,
+            hatch=hatch,
+            edgecolor=edgecolor,
+            linewidth=0.8,
+        )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(pool_ids)
+    ax.set_xticklabels(x_tick_labels)
     ax.set_xlabel("pool", fontsize=12)
     ax.set_ylabel("ratio", fontsize=12)
     ax.tick_params(labelsize=10)
@@ -1194,11 +1247,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--betray-on-nth-opportunity", type=int, default=1)
     parser.add_argument("--betray-start-height", type=int, default=1)
     parser.add_argument("--q", type=float, default=1)
-    parser.add_argument("--betray-threshold", type=int, default=500)
+    parser.add_argument("--betray-threshold", type=int, default=1000)
 
-    parser.add_argument("--three-pools", type=str, default="b=0.33,s=0.33,h=0.34")
+    parser.add_argument("--three-pools", type=str, default="b=0.35,s=0.35,h=0.3")
     parser.add_argument("--three-traitor", type=str, default="s")
-    parser.add_argument("--four-pools", type=str, default="1=0.25,2=0.2,3=0.15,h=0.4")
+    parser.add_argument("--four-pools", type=str, default="1=0.25,2=0.25,3=0.25,h=0.25")
     parser.add_argument("--four-traitor", type=str, default="3")
 
     parser.add_argument("--seed-base", type=int, default=20260224)
@@ -1446,13 +1499,19 @@ def main() -> None:
             summary_rows=summary_three,
             output_png=output_dir / "cartel_three.png",
             output_pdf=output_dir / "cartel_three.pdf",
-            title="Three-pool Cartel-TBW Simulation",
+            title="Three-pool Cartel-TBW Simulation (Traitor above threshold)",
+            display_pool_labels=build_display_pool_labels(
+                three_pool_ids, args.three_traitor
+            ),
         )
         plot_summary(
             summary_rows=summary_four,
             output_png=output_dir / "cartel_four.png",
             output_pdf=output_dir / "cartel_four.pdf",
-            title="Four-pool Cartel-TBW Simulation",
+            title="Four-pool Cartel-TBW Simulation ((Traitor above threshold))",
+            display_pool_labels=build_display_pool_labels(
+                four_pool_ids, args.four_traitor
+            ),
         )
 
     config_text = "\n".join(

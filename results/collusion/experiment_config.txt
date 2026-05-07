@@ -1,0 +1,12 @@
+T=10.0
+gamma=0
+runs=10
+target_blocks_long=20160
+betray_on_nth_opportunity=1
+betray_start_height=1
+q=1
+betray_threshold=1000
+three_pools=b=0.35,s=0.25,h=0.4
+three_traitor=s
+four_pools=1=0.15,2=0.15,3=0.35,h=0.35
+four_traitor=3

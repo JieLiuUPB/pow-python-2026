@@ -354,6 +354,14 @@ def summarize_results(raw_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
     return summary_rows
 
 
+def apply_plot_theme() -> None:
+    try:
+        plt.style.use(["science", "ieee", "no-latex"])
+    except Exception:
+        plt.style.use(["science", "ieee"])
+    plt.rcParams["text.usetex"] = False
+
+
 def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> None:
     ensure_dir(figures_dir)
 
@@ -371,7 +379,7 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         [float(row["se_orphan_rate"]) for row in summary_rows], dtype=float
     )
 
-    plt.style.use(["science", "ieee"])
+    apply_plot_theme()
 
     marker = itertools.cycle(("+", "+", "x", "s", "v", "o", "D", "^"))
 

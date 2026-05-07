@@ -672,7 +672,7 @@ def plot_results(
         markerfacecolor="none",
         capsize=4,
         linewidth=1.5,
-        label="chain-withhold sim",
+        label="TBW sim",
     )
     ax.plot(
         p_vals,
@@ -684,9 +684,7 @@ def plot_results(
         markerfacecolor="none",
         label="baseline $y=p$",
     )
-    ax.plot(
-        p_dense, theory_share, linestyle=":", linewidth=1.5, label="original TBW theory"
-    )
+    ax.plot(p_dense, theory_share, linestyle=":", linewidth=1.5, label="TBW theory")
     ax.set_xlabel("Attacker hashrate $p$", fontsize=12)
     ax.set_ylabel("$A_{\\mathrm{share}}$", fontsize=12)
     ax.tick_params(labelsize=10)
@@ -708,11 +706,9 @@ def plot_results(
         markerfacecolor="none",
         capsize=4,
         linewidth=1.5,
-        label="chain-withhold sim",
+        label="TBW sim",
     )
-    ax.plot(
-        p_dense, theory_orp, linestyle=":", linewidth=1.5, label="original TBW theory"
-    )
+    ax.plot(p_dense, theory_orp, linestyle=":", linewidth=1.5, label="TBW theory")
     ax.set_xlabel("Attacker hashrate $p$", fontsize=12)
     ax.set_ylabel("Orphan rate", fontsize=12)
     ax.tick_params(labelsize=10)
