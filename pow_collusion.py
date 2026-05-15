@@ -820,9 +820,7 @@ def parse_pool_spec(spec: str) -> List[PoolConfig]:
 def validate_inputs(
     sim_config: SimConfig,
     three_pools: Sequence[PoolConfig],
-    four_pools: Sequence[PoolConfig],
     three_traitor: str,
-    four_traitor: str,
 ) -> None:
     if sim_config.T <= 0:
         raise ValueError("T must be > 0")
@@ -841,30 +839,22 @@ def validate_inputs(
     if sim_config.betray_threshold <= 0:
         raise ValueError("betray_threshold must be positive")
 
-    for name, pools in (("three", three_pools), ("four", four_pools)):
-        total = sum(p.hashrate for p in pools)
-        if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
-            raise ValueError(f"{name} hashrates must sum to 1.0, got {total}")
-        for pool in pools:
-            if pool.hashrate < 0.0:
-                raise ValueError(
-                    f"{name} has negative hashrate: {pool.pool_id}={pool.hashrate}"
-                )
+    total = sum(p.hashrate for p in three_pools)
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError(f"three hashrates must sum to 1.0, got {total}")
+    for pool in three_pools:
+        if pool.hashrate < 0.0:
+            raise ValueError(
+                f"three has negative hashrate: {pool.pool_id}={pool.hashrate}"
+            )
 
     three_ids = {p.pool_id for p in three_pools}
-    four_ids = {p.pool_id for p in four_pools}
     if {"b", "s", "h"} - three_ids:
         raise ValueError("three_pools must contain ids: b,s,h")
-    if {"1", "2", "3", "h"} - four_ids:
-        raise ValueError("four_pools must contain ids: 1,2,3,h")
     if three_traitor not in three_ids:
         raise ValueError(f"three_traitor {three_traitor} not in pools")
-    if four_traitor not in four_ids:
-        raise ValueError(f"four_traitor {four_traitor} not in pools")
     if three_traitor not in {"b", "s"}:
         raise ValueError("three_traitor must be one of b,s")
-    if four_traitor not in {"1", "2", "3"}:
-        raise ValueError("four_traitor must be one of 1,2,3")
 
 
 def validate_jobs(jobs: int) -> None:
@@ -876,17 +866,23 @@ def build_scenarios(
     *,
     sim_config: SimConfig,
     experiment: str,
+    pools: Sequence[PoolConfig],
     initial_members: Sequence[str],
     traitor_id: str,
 ) -> List[ScenarioConfig]:
-    if experiment == "three":
+    if experiment != "three":
+        raise ValueError(f"Unknown experiment: {experiment}")
+
+    pool_rates = {p.pool_id: p.hashrate for p in pools}
+    remaining_members = [pool_id for pool_id in initial_members if pool_id != traitor_id]
+    remaining_power = sum(pool_rates[pool_id] for pool_id in remaining_members)
+
+    if remaining_power < 0.5:
         short_break_rule = "dissolve_immediate"
         long_break_rule = "dissolve_threshold"
-    elif experiment == "four":
+    else:
         short_break_rule = "kick_immediate"
         long_break_rule = "kick_threshold"
-    else:
-        raise ValueError(f"Unknown experiment: {experiment}")
 
     return [
         ScenarioConfig(
@@ -963,6 +959,12 @@ def write_rows_csv(
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def read_rows_csv(path: Path) -> List[Dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return [dict(row) for row in reader]
 
 
 def summarize_results(
@@ -1070,10 +1072,10 @@ def plot_summary(
         ),
     ]
 
-    hashrates = [float(row["hashrate_p"]) for row in summary_rows]
-    if hashrates:
-        y_min = min(hashrates) - 0.05
-        y_max = max(hashrates) + 0.05
+    all_values = [float(row[key]) for row in summary_rows for key, _, _, _, _ in series]
+    if all_values:
+        y_min = min(all_values) - 0.01
+        y_max = math.ceil((max(all_values) + 0.05) * 10.0) / 10.0
     else:
         y_min, y_max = 0.0, 1.0
 
@@ -1249,16 +1251,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q", type=float, default=1)
     parser.add_argument("--betray-threshold", type=int, default=1000)
 
-    parser.add_argument("--three-pools", type=str, default="b=0.35,s=0.35,h=0.3")
+    parser.add_argument("--three-pools", type=str, default="b=0.3,s=0.3,h=0.4")
     parser.add_argument("--three-traitor", type=str, default="s")
-    parser.add_argument("--four-pools", type=str, default="1=0.25,2=0.25,3=0.25,h=0.25")
-    parser.add_argument("--four-traitor", type=str, default="3")
 
     parser.add_argument("--seed-base", type=int, default=20260224)
     parser.add_argument("--max-events", type=int, default=2_000_000)
     parser.add_argument("--jobs", type=int, default=30)
     parser.add_argument("--output-dir", type=Path, default=Path("results/collusion"))
     parser.add_argument("--skip-plots", action="store_true")
+    parser.add_argument(
+        "--plot-only-from-summary",
+        action="store_true",
+        help="rebuild plots from existing summary.csv files without rerunning simulations",
+    )
     parser.add_argument(
         "--no-progress",
         action="store_true",
@@ -1364,6 +1369,36 @@ def run_option_a_unit_tests() -> None:
         "s",
     ]
 
+    low_power_three_pools = parse_pool_spec("b=0.49,s=0.11,h=0.40")
+    low_power_three_scenarios = build_scenarios(
+        sim_config=sim_config,
+        experiment="three",
+        pools=low_power_three_pools,
+        initial_members=("b", "s"),
+        traitor_id="s",
+    )
+    assert low_power_three_scenarios[1].break_rule == "dissolve_immediate"
+    assert low_power_three_scenarios[2].break_rule == "dissolve_threshold"
+
+    low_power_break = CollusionSimulation(
+        experiment="three",
+        sim_config=sim_config,
+        pools=low_power_three_pools,
+        scenario=low_power_three_scenarios[1],
+        run_id=0,
+        seed=1,
+        max_events=100,
+    )
+    low_power_break._on_member_first_block(miner_id="b", parent_id=0)
+    low_power_break._on_private_mine(miner_id="s")
+    assert low_power_break.controller.members == set()
+    assert low_power_break.controller.state == "IDLE"
+    assert all(
+        process.target_kind == "public"
+        and process.target_tip_id == low_power_break.canonical_tip_id
+        for process in low_power_break.build_mining_processes()
+    )
+
 
 def main() -> None:
     parser = build_arg_parser()
@@ -1373,7 +1408,6 @@ def main() -> None:
     validate_jobs(args.jobs)
 
     three_pools = parse_pool_spec(args.three_pools)
-    four_pools = parse_pool_spec(args.four_pools)
 
     sim_config = SimConfig(
         T=args.T,
@@ -1389,23 +1423,33 @@ def main() -> None:
     validate_inputs(
         sim_config=sim_config,
         three_pools=three_pools,
-        four_pools=four_pools,
         three_traitor=args.three_traitor,
-        four_traitor=args.four_traitor,
     )
 
     scenarios_three = build_scenarios(
         sim_config=sim_config,
         experiment="three",
+        pools=three_pools,
         initial_members=("b", "s"),
         traitor_id=args.three_traitor,
     )
-    scenarios_four = build_scenarios(
-        sim_config=sim_config,
-        experiment="four",
-        initial_members=("1", "2", "3"),
-        traitor_id=args.four_traitor,
-    )
+    output_dir: Path = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.plot_only_from_summary:
+        summary_three = read_rows_csv(output_dir / "three" / "summary.csv")
+        plot_summary(
+            summary_rows=summary_three,
+            output_png=output_dir / "cartel_three.png",
+            output_pdf=output_dir / "cartel_three.pdf",
+            title="Three-pool Cartel-TBW Simulation (Traitor above threshold)",
+            display_pool_labels=build_display_pool_labels(
+                [str(row["pool_id"]) for row in summary_three],
+                args.three_traitor,
+            ),
+        )
+        print(f"Plots rebuilt from summary CSVs in: {output_dir}")
+        return
 
     results_three = run_experiment(
         experiment="three",
@@ -1419,28 +1463,8 @@ def main() -> None:
     )
     print("[three] experiment completed")
 
-    results_four = run_experiment(
-        experiment="four",
-        pools=four_pools,
-        sim_config=sim_config,
-        scenarios=scenarios_four,
-        seed_base=args.seed_base,
-        max_events=args.max_events,
-        jobs=args.jobs,
-        show_progress=not args.no_progress,
-    )
-    print("[four] experiment completed")
-
-    output_dir: Path = args.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     three_pool_ids = [p.pool_id for p in three_pools]
-    four_pool_ids = [p.pool_id for p in four_pools]
-    all_pool_ids = sorted(set(three_pool_ids) | set(four_pool_ids))
-
     three_rows = rows_from_results(results_three, three_pool_ids)
-    four_rows = rows_from_results(results_four, four_pool_ids)
-    all_rows = rows_from_results([*results_three, *results_four], all_pool_ids)
 
     base_fields = [
         "experiment",
@@ -1466,23 +1490,10 @@ def main() -> None:
         + [f"blocks_pool_{pid}" for pid in three_pool_ids]
         + [f"share_pool_{pid}" for pid in three_pool_ids]
     )
-    four_fields = (
-        base_fields
-        + [f"blocks_pool_{pid}" for pid in four_pool_ids]
-        + [f"share_pool_{pid}" for pid in four_pool_ids]
-    )
-    all_fields = (
-        base_fields
-        + [f"blocks_pool_{pid}" for pid in all_pool_ids]
-        + [f"share_pool_{pid}" for pid in all_pool_ids]
-    )
 
     write_rows_csv(output_dir / "three" / "raw_runs.csv", three_rows, three_fields)
-    write_rows_csv(output_dir / "four" / "raw_runs.csv", four_rows, four_fields)
-    write_rows_csv(output_dir / "raw_runs.csv", all_rows, all_fields)
 
     summary_three = summarize_results(three_rows, three_pools)
-    summary_four = summarize_results(four_rows, four_pools)
 
     summary_fields = ["pool_id", "hashrate_p"]
     for scenario_name in SCENARIO_ORDER:
@@ -1490,7 +1501,6 @@ def main() -> None:
         summary_fields.append(f"{scenario_name}_share_std")
 
     write_rows_csv(output_dir / "three" / "summary.csv", summary_three, summary_fields)
-    write_rows_csv(output_dir / "four" / "summary.csv", summary_four, summary_fields)
 
     if args.skip_plots:
         print("[info] --skip-plots enabled, skip png/pdf plotting")
@@ -1502,15 +1512,6 @@ def main() -> None:
             title="Three-pool Cartel-TBW Simulation (Traitor above threshold)",
             display_pool_labels=build_display_pool_labels(
                 three_pool_ids, args.three_traitor
-            ),
-        )
-        plot_summary(
-            summary_rows=summary_four,
-            output_png=output_dir / "cartel_four.png",
-            output_pdf=output_dir / "cartel_four.pdf",
-            title="Four-pool Cartel-TBW Simulation ((Traitor above threshold))",
-            display_pool_labels=build_display_pool_labels(
-                four_pool_ids, args.four_traitor
             ),
         )
 
@@ -1526,8 +1527,6 @@ def main() -> None:
             f"betray_threshold={sim_config.betray_threshold}",
             f"three_pools={args.three_pools}",
             f"three_traitor={args.three_traitor}",
-            f"four_pools={args.four_pools}",
-            f"four_traitor={args.four_traitor}",
         ]
     )
     (output_dir / "experiment_config.txt").write_text(
