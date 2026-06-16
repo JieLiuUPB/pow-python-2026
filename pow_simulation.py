@@ -41,6 +41,7 @@ def get_plt():  # pragma: no cover - plotting is optional at runtime
 
 EPS = 1e-12
 FIXED_TIME_SCENARIO_P_VALUES = [0.65, 0.75, 0.85]
+SCENARIO4_P_VALUES = [0.55, 0.65, 0.75, 0.85]
 FIXED_TIME_SCENARIO_N_VALUES = [1, 2, 3, 5]
 SELFISH_GAMMA = 0.0
 
@@ -1518,6 +1519,7 @@ def scenario4(
         scenario_name="scenario4_public_daa_by_time",
         daa_count_basis="public",
         progress_desc="scenario4 runs",
+        p_values=SCENARIO4_P_VALUES,
     )
 
 
@@ -1532,7 +1534,7 @@ def scenario4_selfish(
     jobs: int,
     show_progress: bool,
 ) -> tuple[List[SelfishRunResult], List[EpochStat], List[Dict[str, Any]]]:
-    p_values = FIXED_TIME_SCENARIO_P_VALUES
+    p_values = SCENARIO4_P_VALUES
     n_values = FIXED_TIME_SCENARIO_N_VALUES
     scenario_name = "scenario4_selfish_public_daa_by_time"
     out_dir = results_root / scenario_name
@@ -1682,8 +1684,9 @@ def run_fixed_time_daa_scenario(
     scenario_name: str,
     daa_count_basis: str,
     progress_desc: str,
+    p_values: Optional[Sequence[float]] = None,
 ) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
-    p_values = FIXED_TIME_SCENARIO_P_VALUES
+    p_values = list(FIXED_TIME_SCENARIO_P_VALUES if p_values is None else p_values)
     n_values = FIXED_TIME_SCENARIO_N_VALUES
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
@@ -1790,6 +1793,7 @@ def plot_fixed_time_ratio(
     *,
     stem: str,
     title: str,
+    param_symbol: str = "p",
 ) -> None:
     plt_mod = get_plt()
     if plt_mod is None:
@@ -1799,6 +1803,7 @@ def plot_fixed_time_ratio(
 
     fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
     p_values = sorted({float(row["p"]) for row in summary_rows})
+    x_ticks = sorted({int(row["n"]) for row in summary_rows})
     palette = ["#155eef", "#0f766e", "#b42318", "#7a5af8", "#dd6b20"]
     plot_data_rows: List[Dict[str, Any]] = []
 
@@ -1823,7 +1828,7 @@ def plot_fixed_time_ratio(
             markersize=3,
             markerfacecolor="none",
             markeredgewidth=1.4,
-            label=f"p={p:.2f}",
+            label=rf"${param_symbol}$={p:.2f}",
         )
         ax.fill_between(x, y - yerr, y + yerr, color=color, alpha=0.08)
         for i in range(len(x)):
@@ -1843,7 +1848,8 @@ def plot_fixed_time_ratio(
     ax.set_xlabel("Round n", fontsize=12)
     ax.set_ylabel("mean( A_share_sim / A_share_honest )", fontsize=12)
     ax.tick_params(labelsize=10)
-    ax.set_title(title)
+    ax.set_xticks(x_ticks)
+    ax.set_title(title, fontsize=13)
     ax.legend(loc="best", ncols=2, fontsize=10)
     ax.margins(x=0.03)
     ax.grid(True, linestyle="--", alpha=0.6)
@@ -1861,6 +1867,7 @@ def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         fig_dir,
         stem="s3_fixedtime_ratio",
         title="Fixed-Time Ratio with Canonical-Chain DAA",
+        param_symbol=r"\alpha",
     )
 
 
@@ -1870,6 +1877,7 @@ def plot_scenario4(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         fig_dir,
         stem="s4_fixedtime_ratio",
         title="Fixed-Time Ratio with Orphan-Aware DAA",
+        param_symbol=r"\alpha",
     )
 
 
@@ -1889,24 +1897,26 @@ def plot_scenario4_comparison(
         return
 
     p_values = sorted({float(row["p"]) for row in all_rows})
-    ncols = len(p_values)
+    x_ticks = sorted({int(row["n"]) for row in all_rows})
+    nrows = 2
+    ncols = 2
     fig, axes = plt_mod.subplots(
-        1,
+        nrows,
         ncols,
-        figsize=(5.4 * ncols, 4.125),
+        figsize=(5.6 * ncols, 4.35 * nrows),
         squeeze=False,
         sharey=True,
     )
-    palette = {"TBW": "#155eef", "Selfish mining": "#b42318"}
-    markers = {"TBW": "o", "Selfish mining": "s"}
-    strategy_order = ["TBW", "Selfish mining"]
+    palette = {"OCW": "#155eef", "SM": "#b42318"}
+    markers = {"OCW": "o", "SM": "s"}
+    strategy_order = ["OCW", "SM"]
     plot_data_rows: List[Dict[str, Any]] = []
 
     for idx, p in enumerate(p_values):
-        ax = axes[0][idx]
+        ax = axes[idx // ncols][idx % ncols]
         for strategy in strategy_order:
             source_rows = (
-                tbw_summary_rows if strategy == "TBW" else selfish_summary_rows
+                tbw_summary_rows if strategy == "OCW" else selfish_summary_rows
             )
             rows = sorted(
                 [row for row in source_rows if abs(float(row["p"]) - p) < 1e-12],
@@ -1946,23 +1956,25 @@ def plot_scenario4_comparison(
                     }
                 )
 
-        ax.set_title(f"p={p:.2f}")
-        ax.set_xlabel("Round n", fontsize=12)
-        ax.tick_params(labelsize=10)
+        ax.set_xticks(x_ticks)
+        ax.set_title(rf"$\alpha$={p:.2f}", fontsize=14)
+        ax.set_xlabel("Round n", fontsize=13)
+        ax.tick_params(labelsize=11)
         ax.margins(x=0.03)
         ax.grid(True, linestyle="--", alpha=0.6)
         ax.axhline(
             1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
         )
-        ax.legend(loc="best", fontsize=10)
+        ax.legend(loc="best", fontsize=11)
 
-    axes[0][0].set_ylabel("mean( A_share_sim / A_share_honest )", fontsize=12)
-    fig.suptitle("TBW vs SM under Orphan-Aware DAA", fontsize=13)
+    axes[0][0].set_ylabel("mean( A_share_sim / A_share_honest )", fontsize=13)
+    axes[1][0].set_ylabel("mean( A_share_sim / A_share_honest )", fontsize=13)
+    fig.suptitle("OCW vs SM under Orphan-Aware DAA", fontsize=17)
     fig.tight_layout()
-    save_figure_bundle(fig_dir, "s4_fixedtime_ratio_tbw_vs_selfish", fig)
+    save_figure_bundle(fig_dir, "s4_fixedtime_ratio_ocw_vs_sm", fig)
     plt_mod.show()
     plt_mod.close(fig)
-    save_plot_data(fig_dir, "s4_fixedtime_ratio_tbw_vs_selfish", plot_data_rows)
+    save_plot_data(fig_dir, "s4_fixedtime_ratio_ocw_vs_sm", plot_data_rows)
 
 
 def write_config_summary(
