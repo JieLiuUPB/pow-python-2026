@@ -1793,7 +1793,7 @@ def plot_fixed_time_ratio(
     *,
     stem: str,
     title: str,
-    param_symbol: str = "p",
+    param_symbol: str = r"\alpha",
 ) -> None:
     plt_mod = get_plt()
     if plt_mod is None:

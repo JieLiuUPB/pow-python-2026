@@ -202,14 +202,14 @@ def plot_comparison(
         markerfacecolor="none",
         capsize=4,
         linewidth=1.5,
-        label="TBW sim",
+        label="OCW sim",
     )
     ax.plot(
         tbw_theory_p,
         tbw_theory_dense,
         linestyle=":",
         linewidth=1.5,
-        label="TBW theory",
+        label="OCW theory",
     )
     ax.errorbar(
         selfish_p,
@@ -220,7 +220,7 @@ def plot_comparison(
         markerfacecolor="none",
         capsize=4,
         linewidth=1.5,
-        label="selfish mining sim",
+        label="SM sim",
     )
     if include_selfish_theory:
         ax.plot(
@@ -228,10 +228,10 @@ def plot_comparison(
             selfish_theory_dense,
             linestyle="--",
             linewidth=1.5,
-            label="selfish mining theory",
+            label="SM theory",
         )
 
-    ax.set_xlabel("Attacker hashrate $p$", fontsize=12)
+    ax.set_xlabel(r"Attacker hashrate $\alpha$", fontsize=12)
     ax.set_ylabel("Orphan rate", fontsize=12)
     ax.tick_params(labelsize=10)
     ax.set_title("Orphan Rate Comparison")

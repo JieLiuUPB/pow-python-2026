@@ -672,7 +672,7 @@ def plot_results(
         markerfacecolor="none",
         capsize=4,
         linewidth=1.5,
-        label="TBW sim",
+        label="OCW sim",
     )
     ax.plot(
         p_vals,
@@ -682,10 +682,10 @@ def plot_results(
         marker=next(marker),
         markersize=3,
         markerfacecolor="none",
-        label="baseline $y=p$",
+        label=r"baseline $y=\alpha$",
     )
-    ax.plot(p_dense, theory_share, linestyle=":", linewidth=1.5, label="TBW theory")
-    ax.set_xlabel("Attacker hashrate $p$", fontsize=12)
+    ax.plot(p_dense, theory_share, linestyle=":", linewidth=1.5, label="OCW theory")
+    ax.set_xlabel(r"Attacker hashrate $\alpha$", fontsize=12)
     ax.set_ylabel("$A_{\\mathrm{share}}$", fontsize=12)
     ax.tick_params(labelsize=10)
     ax.legend(fontsize=10)
@@ -706,10 +706,10 @@ def plot_results(
         markerfacecolor="none",
         capsize=4,
         linewidth=1.5,
-        label="TBW sim",
+        label="OCW sim",
     )
-    ax.plot(p_dense, theory_orp, linestyle=":", linewidth=1.5, label="TBW theory")
-    ax.set_xlabel("Attacker hashrate $p$", fontsize=12)
+    ax.plot(p_dense, theory_orp, linestyle=":", linewidth=1.5, label="OCW theory")
+    ax.set_xlabel(r"Attacker hashrate $\alpha$", fontsize=12)
     ax.set_ylabel("Orphan rate", fontsize=12)
     ax.tick_params(labelsize=10)
     ax.legend(fontsize=10)

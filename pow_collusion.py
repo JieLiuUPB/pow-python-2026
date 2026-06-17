@@ -1240,7 +1240,7 @@ def rows_from_results(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Cartel-TBW collusion simulation")
+    parser = argparse.ArgumentParser(description="Cartel-OCW collusion simulation")
     parser.add_argument("--T", type=float, default=10.0)
     parser.add_argument("--gamma", type=float, default=0)
     parser.add_argument("--runs", type=int, default=10)
@@ -1442,7 +1442,7 @@ def main() -> None:
             summary_rows=summary_three,
             output_png=output_dir / "cartel_three.png",
             output_pdf=output_dir / "cartel_three.pdf",
-            title="Three-pool Cartel-TBW Simulation (Traitor above threshold)",
+            title="Three-pool Cartel-OCW Simulation (Traitor above threshold)",
             display_pool_labels=build_display_pool_labels(
                 [str(row["pool_id"]) for row in summary_three],
                 args.three_traitor,
@@ -1509,7 +1509,7 @@ def main() -> None:
             summary_rows=summary_three,
             output_png=output_dir / "cartel_three.png",
             output_pdf=output_dir / "cartel_three.pdf",
-            title="Three-pool Cartel-TBW Simulation (Traitor above threshold)",
+            title="Three-pool Cartel-OCW Simulation (Traitor above threshold)",
             display_pool_labels=build_display_pool_labels(
                 three_pool_ids, args.three_traitor
             ),
