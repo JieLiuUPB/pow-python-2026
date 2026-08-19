@@ -2209,7 +2209,7 @@ def plot_scenario3(
         selfish_summary_rows,
         fig_dir,
         stem="s3_fixedtime_ratio",
-        title="OCW vs SM under Canonical-Chain DAA",
+        title="OCW vs SM under Canonical-Chain-Based DAA",
         max_columns=2,
     )
 
@@ -2219,7 +2219,7 @@ def plot_scenario4(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
         summary_rows,
         fig_dir,
         stem="s4_fixedtime_ratio",
-        title="Fixed-Time Ratio with Orphan-Aware DAA",
+        title="Fixed-Time Ratio with Orphan-Block-Aware DAA",
         param_symbol=r"\alpha",
     )
 
