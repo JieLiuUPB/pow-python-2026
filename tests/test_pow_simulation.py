@@ -1,11 +1,20 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from pow_simulation import (
     Block,
+    SCENARIO3_N_VALUES,
+    SCENARIO4_N_VALUES,
+    SCENARIO4_P_VALUES,
     SelfishMiningDAASimulation,
     TimeCheckpointResult,
     TBWSimulation,
     build_fixed_time_ratio_summary_rows,
+    plot_scenario3,
+    scenario4,
+    scenario4_selfish,
 )
 
 
@@ -50,8 +59,12 @@ class FixedTimeSummaryTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         expected_baseline = 0.55 * 1 * 2016
-        expected_mean = ((1300 / expected_baseline) + (1500 / expected_baseline)) / 2.0
+        expected_blocks_mean = (1300 + 1500) / 2.0
+        expected_mean = expected_blocks_mean / expected_baseline
         self.assertEqual(rows[0]["metric"], "A_blocks_canonical_fixedtime_n_round_over_pn2016")
+        self.assertEqual(rows[0]["physical_time"], 2016 * 10.0)
+        self.assertEqual(rows[0]["attacker_blocks_mean"], expected_blocks_mean)
+        self.assertEqual(rows[0]["normalization_blocks"], expected_baseline)
         self.assertAlmostEqual(rows[0]["metric_mean"], expected_mean)
 
     def test_build_fixed_time_ratio_summary_rows_uses_selfish_checkpoint_ratio_too(self) -> None:
@@ -94,8 +107,12 @@ class FixedTimeSummaryTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         baseline = 0.65 * 2 * 2016
-        expected_mean = ((2100.0 / baseline) + (2300.0 / baseline)) / 2.0
+        expected_blocks_mean = (2100.0 + 2300.0) / 2.0
+        expected_mean = expected_blocks_mean / baseline
         self.assertEqual(rows[0]["metric"], "A_blocks_canonical_fixedtime_n_round_over_pn2016")
+        self.assertEqual(rows[0]["physical_time"], 4032 * 10.0)
+        self.assertEqual(rows[0]["attacker_blocks_mean"], expected_blocks_mean)
+        self.assertEqual(rows[0]["normalization_blocks"], baseline)
         self.assertAlmostEqual(rows[0]["metric_mean"], expected_mean)
 
     def test_build_fixed_time_ratio_uses_configured_epoch_length(self) -> None:
@@ -120,8 +137,12 @@ class FixedTimeSummaryTests(unittest.TestCase):
             metric_name="custom_epoch_ratio",
             runs=1,
             epoch_len=100,
+            T=2.0,
         )
 
+        self.assertEqual(rows[0]["physical_time"], 400.0)
+        self.assertEqual(rows[0]["attacker_blocks_mean"], 100.0)
+        self.assertEqual(rows[0]["normalization_blocks"], 100.0)
         self.assertAlmostEqual(rows[0]["metric_mean"], 1.0)
 
 
@@ -217,6 +238,76 @@ class DifficultyAdjustmentBasisTests(unittest.TestCase):
 
 
 class SelfishDifficultyAdjustmentTests(unittest.TestCase):
+    def test_majority_public_daa_counts_work_at_each_mining_time(self) -> None:
+        sim = SelfishMiningDAASimulation(
+            T=10.0,
+            p=0.75,
+            gamma=0.0,
+            seed=1,
+            mode="by_time",
+            t_end=100.0,
+            enable_daa=True,
+            epoch_len=3,
+            scenario="selfish-public-test",
+            run_id=0,
+            n_value=1,
+            daa_count_basis="public",
+        )
+
+        for t_mined, handler in (
+            (10.0, sim._handle_mine_A),
+            (15.0, sim._handle_mine_H),
+            (20.0, sim._handle_mine_A),
+        ):
+            sim.t = t_mined
+            handler()
+            sim._maybe_adjust_difficulty()
+
+        self.assertEqual(sim.epochs_completed, 1)
+        self.assertAlmostEqual(sim.epoch_stats[0].t_end, 20.0)
+        self.assertAlmostEqual(sim.difficulty, (3 * 10.0) / 20.0)
+        self.assertEqual(sim.epoch_stats[0].a_blocks_counted, 2)
+        self.assertEqual(sim.epoch_stats[0].h_blocks_counted, 1)
+
+    def test_majority_attacker_reveals_a_full_private_epoch_and_triggers_daa(self) -> None:
+        sim = SelfishMiningDAASimulation(
+            T=10.0,
+            p=0.75,
+            gamma=0.0,
+            seed=1,
+            mode="by_time",
+            t_end=100.0,
+            enable_daa=True,
+            epoch_len=3,
+            scenario="selfish-majority-test",
+            run_id=0,
+            n_value=1,
+            daa_count_basis="canonical",
+        )
+
+        sim.t = 10.0
+        sim._handle_mine_A()
+        sim.t = 15.0
+        sim._handle_mine_H()
+        sim.t = 20.0
+        sim._handle_mine_A()
+
+        checkpoint = sim._build_checkpoint_result(20.0)
+        self.assertEqual(checkpoint.A_blocks_canonical, 2)
+        self.assertEqual(checkpoint.H_blocks_canonical, 0)
+
+        sim.t = 40.0
+        sim._handle_mine_A()
+        sim._maybe_adjust_difficulty()
+
+        self.assertEqual(sim.epochs_completed, 1)
+        self.assertAlmostEqual(sim.epoch_stats[0].t_end, 40.0)
+        self.assertAlmostEqual(sim.difficulty, 0.75)
+        self.assertEqual(
+            [sim.blocks_by_id[bid].miner for bid in sim.canonical_chain_ids],
+            ["A", "A", "A"],
+        )
+
     def test_canonical_basis_waits_for_canonical_chain_epoch_len(self) -> None:
         sim = SelfishMiningDAASimulation(
             T=10.0,
@@ -266,6 +357,73 @@ class SelfishDifficultyAdjustmentTests(unittest.TestCase):
 
         self.assertEqual(sim.epochs_completed, 1)
         self.assertAlmostEqual(sim.difficulty, (3 * 10.0) / 12.0)
+
+
+class Scenario4NormalizationTests(unittest.TestCase):
+    def test_ocw_keeps_attacker_hashrate_normalization(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            _, _, summary_rows = scenario4(
+                T=2.0,
+                runs=1,
+                epoch_len=4,
+                base_seed=2026,
+                results_root=Path(tmp_dir),
+                jobs=1,
+                show_progress=False,
+            )
+
+            for row in summary_rows:
+                expected_baseline = float(row["p"]) * int(row["n"]) * 4
+                self.assertEqual(row["normalization_blocks"], expected_baseline)
+                self.assertEqual(
+                    row["metric"], "A_blocks_canonical_fixedtime_over_pn4"
+                )
+                self.assertAlmostEqual(
+                    row["metric_mean"],
+                    row["attacker_blocks_mean"] / expected_baseline,
+                )
+
+    def test_uses_scenario3_physical_time_and_honest_chain_normalization(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            _, _, summary_rows = scenario4_selfish(
+                T=2.0,
+                runs=1,
+                epoch_len=4,
+                base_seed=2026,
+                gamma=0.0,
+                results_root=Path(tmp_dir),
+                jobs=1,
+                show_progress=False,
+            )
+
+            self.assertEqual(
+                len(summary_rows),
+                len(SCENARIO4_P_VALUES) * len(SCENARIO4_N_VALUES),
+            )
+            self.assertEqual(
+                sorted({int(row["n"]) for row in summary_rows}),
+                SCENARIO4_N_VALUES,
+            )
+            for row in summary_rows:
+                expected_baseline = int(row["n"]) * 4
+                self.assertEqual(row["physical_time"], int(row["n"]) * 4 * 2.0)
+                self.assertEqual(row["normalization_blocks"], expected_baseline)
+                self.assertEqual(
+                    row["metric"], "A_blocks_canonical_fixedtime_over_n4"
+                )
+                self.assertAlmostEqual(
+                    row["metric_mean"],
+                    row["attacker_blocks_mean"] / expected_baseline,
+                )
+
+
+class Scenario3PlotProtocolTests(unittest.TestCase):
+    def test_uses_requested_n_values_and_two_horizontal_panels(self) -> None:
+        self.assertEqual(SCENARIO3_N_VALUES, [1, 2, 3, 5])
+        with patch("pow_simulation.plot_strategy_comparison") as plot_comparison:
+            plot_scenario3([], [], Path("unused"))
+
+        self.assertEqual(plot_comparison.call_args.kwargs["max_columns"], 2)
 
 
 if __name__ == "__main__":

@@ -41,10 +41,13 @@ def get_plt():  # pragma: no cover - plotting is optional at runtime
 
 
 EPS = 1e-12
-SCENARIO3_P_VALUES = [0.65]
-SCENARIO4_P_VALUES = [0.55, 0.65, 0.75, 0.85]
-FIXED_TIME_SCENARIO_N_VALUES = [1, 3, 5, 7]
+SCENARIO3_P_VALUES = [0.65, 0.75]
+SCENARIO4_P_VALUES = [0.65, 0.75]
+SCENARIO3_N_VALUES = [1, 2, 3, 5]
+SCENARIO4_N_VALUES = [1, 3, 10]
 SELFISH_GAMMA = 0.0
+FIXED_TIME_X_LABEL = "physical time: 2016*n*T"
+FIXED_TIME_Y_LABEL = "attack block number/honest block number"
 
 
 @dataclass
@@ -54,6 +57,7 @@ class Block:
     height: int
     miner: str
     t_publish: float
+    t_mined: Optional[float] = None
 
 
 @dataclass
@@ -62,6 +66,7 @@ class PrivateBlock:
     parent_id: int
     height: int
     miner: str
+    t_mined: Optional[float] = None
 
 
 @dataclass
@@ -770,6 +775,7 @@ class SelfishMiningDAASimulation:
         if daa_count_basis not in {"canonical", "public"}:
             raise ValueError("daa_count_basis must be 'canonical' or 'public'")
         self.daa_count_basis = daa_count_basis
+        self.majority_mode = self.p > 0.5
         self.rng = np.random.default_rng(self.seed)
 
         self.t = 0.0
@@ -784,6 +790,13 @@ class SelfishMiningDAASimulation:
         self._next_block_id = 1
 
         self.private_chain: List[PrivateBlock] = []
+        self.majority_private_base_id = 0
+        self.majority_attacker_blocks_mined = 0
+        # Scenario 4 counts all work that will be published. Every private
+        # block in majority mode is guaranteed to be released with its epoch,
+        # so retain its actual mining time instead of assigning an entire
+        # release batch one timestamp.
+        self.majority_public_work: List[tuple[str, float]] = []
         self.in_race = False
         self.race_attacker_tip_id: Optional[int] = None
         self.race_honest_tip_id: Optional[int] = None
@@ -803,6 +816,21 @@ class SelfishMiningDAASimulation:
         return int(round(t_checkpoint / base_horizon))
 
     def _build_checkpoint_result(self, t_checkpoint: float) -> TimeCheckpointResult:
+        if self.majority_mode:
+            return TimeCheckpointResult(
+                scenario=self.scenario,
+                p=self.p,
+                n=self._checkpoint_n_value(t_checkpoint),
+                run_id=self.run_id,
+                seed=self.seed,
+                t_checkpoint=t_checkpoint,
+                A_blocks_canonical=self.majority_attacker_blocks_mined,
+                H_blocks_canonical=0,
+                canonical_len=self.majority_attacker_blocks_mined,
+                final_difficulty_so_far=self.difficulty,
+                num_epochs_completed_so_far=self.epochs_completed,
+            )
+
         a_canonical = sum(
             1 for bid in self.canonical_chain_ids if self.blocks_by_id[bid].miner == "A"
         )
@@ -888,6 +916,7 @@ class SelfishMiningDAASimulation:
             height=parent.height + 1,
             miner=miner,
             t_publish=t_publish,
+            t_mined=t_publish,
         )
         self._publish_block(block)
         return bid
@@ -896,23 +925,32 @@ class SelfishMiningDAASimulation:
         prefix = self.private_chain[:count]
         published_ids: List[int] = []
         for private_block in prefix:
-            self._publish_block(
-                Block(
-                    id=private_block.id,
-                    parent_id=private_block.parent_id,
-                    height=private_block.height,
-                    miner=private_block.miner,
-                    t_publish=self.t,
-                )
+            block = Block(
+                id=private_block.id,
+                parent_id=private_block.parent_id,
+                height=private_block.height,
+                miner=private_block.miner,
+                t_publish=self.t,
+                t_mined=private_block.t_mined,
             )
+            self.blocks_by_id[block.id] = block
+            self.published_block_ids.append(block.id)
+            self.tips.add(block.id)
+            if block.parent_id is not None:
+                self.tips.discard(block.parent_id)
             published_ids.append(private_block.id)
         self.private_chain = self.private_chain[count:]
+        if published_ids:
+            self._refresh_canonical()
         return published_ids
 
     def _mine_private_block(self) -> None:
         if self.private_chain:
             parent_id = self.private_chain[-1].id
             parent_height = self.private_chain[-1].height
+        elif self.majority_mode:
+            parent_id = self.majority_private_base_id
+            parent_height = self.blocks_by_id[parent_id].height
         else:
             parent_id = self.canonical_tip_id
             parent_height = self.blocks_by_id[parent_id].height
@@ -923,10 +961,20 @@ class SelfishMiningDAASimulation:
                 parent_id=parent_id,
                 height=parent_height + 1,
                 miner="A",
+                t_mined=self.t,
             )
         )
 
     def _handle_mine_A(self) -> None:
+        if self.majority_mode:
+            self._mine_private_block()
+            self.majority_attacker_blocks_mined += 1
+            self.majority_public_work.append(("A", self.t))
+            if len(self.private_chain) == self.epoch_len:
+                published_ids = self._publish_private_prefix(self.epoch_len)
+                self.majority_private_base_id = published_ids[-1]
+            return
+
         if self.in_race:
             if self.race_attacker_tip_id is None:
                 raise RuntimeError("race attacker tip is missing")
@@ -941,6 +989,13 @@ class SelfishMiningDAASimulation:
         self._mine_private_block()
 
     def _handle_mine_H(self) -> None:
+        if self.majority_mode:
+            self._publish_new_block(
+                parent_id=self.canonical_tip_id, miner="H", t_publish=self.t
+            )
+            self.majority_public_work.append(("H", self.t))
+            return
+
         if self.in_race:
             if self.race_attacker_tip_id is None or self.race_honest_tip_id is None:
                 raise RuntimeError("race tips are missing")
@@ -982,24 +1037,50 @@ class SelfishMiningDAASimulation:
         if not self.enable_daa:
             return
 
-        if self.daa_count_basis == "canonical":
+        use_majority_public_work = (
+            self.majority_mode
+            and self.daa_count_basis == "public"
+            and bool(self.majority_public_work)
+        )
+        if use_majority_public_work:
+            daa_count = len(self.majority_public_work)
+            daa_block_ids: Sequence[int] = []
+        elif self.daa_count_basis == "canonical":
             daa_block_ids = self.canonical_chain_ids
+            daa_count = len(daa_block_ids)
         else:
             daa_block_ids = self.published_block_ids
-        while len(daa_block_ids) >= (self.epochs_completed + 1) * self.epoch_len:
+            daa_count = len(daa_block_ids)
+        while daa_count >= (self.epochs_completed + 1) * self.epoch_len:
             epoch_index = self.epochs_completed + 1
             boundary_len = epoch_index * self.epoch_len
-            boundary_block_id = daa_block_ids[boundary_len - 1]
-            boundary_time = self.blocks_by_id[boundary_block_id].t_publish
+            if use_majority_public_work:
+                boundary_time = self.majority_public_work[boundary_len - 1][1]
+                segment_miners = [
+                    miner
+                    for miner, _ in self.majority_public_work[
+                        (epoch_index - 1) * self.epoch_len : boundary_len
+                    ]
+                ]
+                a_blocks = segment_miners.count("A")
+                h_blocks = segment_miners.count("H")
+            else:
+                boundary_block_id = daa_block_ids[boundary_len - 1]
+                boundary_time = self.blocks_by_id[boundary_block_id].t_publish
+                segment = daa_block_ids[
+                    (epoch_index - 1) * self.epoch_len : boundary_len
+                ]
+                a_blocks = sum(
+                    1 for bid in segment if self.blocks_by_id[bid].miner == "A"
+                )
+                h_blocks = sum(
+                    1 for bid in segment if self.blocks_by_id[bid].miner == "H"
+                )
 
             t_total = max(boundary_time - self.t_epoch_start, EPS)
             d_old = self.difficulty
             d_new = d_old * (self.epoch_len * self.T) / t_total
             self.difficulty = d_new
-
-            segment = daa_block_ids[(epoch_index - 1) * self.epoch_len : boundary_len]
-            a_blocks = sum(1 for bid in segment if self.blocks_by_id[bid].miner == "A")
-            h_blocks = sum(1 for bid in segment if self.blocks_by_id[bid].miner == "H")
 
             self.epoch_stats.append(
                 EpochStat(
@@ -1061,7 +1142,16 @@ class SelfishMiningDAASimulation:
                 elif block.miner == "H":
                     h_orphans += 1
 
-        canonical_len = len(self.canonical_chain_ids)
+        if self.majority_mode:
+            # A majority attacker's unfinished private epoch is expected to
+            # replace the competing honest branch when it is published.
+            a_canonical = self.majority_attacker_blocks_mined
+            h_canonical = 0
+            a_orphans = 0
+            h_orphans = h_published
+            canonical_len = a_canonical
+        else:
+            canonical_len = len(self.canonical_chain_ids)
         a_share = (a_canonical / canonical_len) if canonical_len > 0 else 0.0
 
         return SelfishRunResult(
@@ -1477,6 +1567,8 @@ def scenario3(
         daa_count_basis="canonical",
         progress_desc="scenario3 runs",
         p_values=SCENARIO3_P_VALUES,
+        n_values=SCENARIO3_N_VALUES,
+        normalize_by_alpha=True,
     )
 
 
@@ -1488,30 +1580,112 @@ def build_fixed_time_ratio_summary_rows(
     metric_name: str,
     runs: int,
     epoch_len: int = 2016,
+    T: float = 10.0,
+    normalize_by_alpha: bool = True,
 ) -> List[Dict[str, Any]]:
     if epoch_len <= 0:
         raise ValueError("epoch_len must be positive")
+    if T <= 0.0:
+        raise ValueError("T must be positive")
 
     summary_rows: List[Dict[str, Any]] = []
     for p in p_values:
         for n_value in n_values:
-            baseline = p * n_value * epoch_len
-            values = [
-                checkpoint.A_blocks_canonical / baseline
+            physical_time = epoch_len * n_value * T
+            normalization_blocks = n_value * epoch_len
+            if normalize_by_alpha:
+                normalization_blocks *= p
+            attacker_blocks = [
+                float(checkpoint.A_blocks_canonical)
                 for checkpoint in checkpoint_results
                 if abs(checkpoint.p - p) < 1e-12 and checkpoint.n == n_value
             ]
-            m, s = aggregate_metric(values)
+            attacker_blocks_mean, attacker_blocks_std = aggregate_metric(
+                attacker_blocks
+            )
             summary_rows.append(
                 {
                     "p": p,
                     "n": n_value,
+                    "physical_time": physical_time,
+                    "attacker_blocks_mean": attacker_blocks_mean,
+                    "attacker_blocks_std": attacker_blocks_std,
+                    "normalization_blocks": normalization_blocks,
                     "metric": metric_name,
-                    "metric_mean": m,
-                    "metric_std": s,
+                    "metric_mean": attacker_blocks_mean / normalization_blocks,
+                    "metric_std": attacker_blocks_std / normalization_blocks,
                     "runs": runs,
                 }
             )
+    return summary_rows
+
+
+def _finalize_fixed_time_results(
+    *,
+    raw_results: List[Any],
+    epoch_rows: List[EpochStat],
+    checkpoint_rows: List[TimeCheckpointResult],
+    out_dir: Path,
+    p_values: Sequence[float],
+    n_values: Sequence[int],
+    runs: int,
+    epoch_len: int,
+    T: float,
+    normalize_by_alpha: bool,
+) -> List[Dict[str, Any]]:
+    raw_results.sort(key=lambda result: (float(result.p), int(result.run_id)))
+    epoch_rows.sort(
+        key=lambda epoch: (
+            float(epoch.p),
+            int(epoch.n),
+            int(epoch.run_id),
+            int(epoch.epoch_index),
+        )
+    )
+    checkpoint_rows.sort(
+        key=lambda checkpoint: (
+            float(checkpoint.p),
+            int(checkpoint.n),
+            int(checkpoint.run_id),
+        )
+    )
+
+    raw_dict_rows = [result.to_dict() for result in raw_results]
+    raw_fields = list(raw_dict_rows[0].keys()) if raw_dict_rows else []
+    write_csv(out_dir / "raw_runs.csv", raw_dict_rows, raw_fields)
+    write_epoch_stats_csv(out_dir, epoch_rows)
+    write_checkpoint_csv(out_dir, checkpoint_rows)
+
+    summary_rows = build_fixed_time_ratio_summary_rows(
+        checkpoint_results=checkpoint_rows,
+        p_values=p_values,
+        n_values=n_values,
+        metric_name=(
+            f"A_blocks_canonical_fixedtime_over_pn{epoch_len}"
+            if normalize_by_alpha
+            else f"A_blocks_canonical_fixedtime_over_n{epoch_len}"
+        ),
+        runs=runs,
+        epoch_len=epoch_len,
+        T=T,
+        normalize_by_alpha=normalize_by_alpha,
+    )
+    write_csv(
+        out_dir / "summary.csv",
+        summary_rows,
+        [
+            "p",
+            "n",
+            "physical_time",
+            "attacker_blocks_mean",
+            "attacker_blocks_std",
+            "normalization_blocks",
+            "metric",
+            "metric_mean",
+            "metric_std",
+            "runs",
+        ],
+    )
     return summary_rows
 
 
@@ -1537,6 +1711,8 @@ def scenario4(
         daa_count_basis="public",
         progress_desc="scenario4 runs",
         p_values=SCENARIO4_P_VALUES,
+        n_values=SCENARIO4_N_VALUES,
+        normalize_by_alpha=True,
     )
 
 
@@ -1554,9 +1730,11 @@ def run_fixed_time_selfish_daa_scenario(
     daa_count_basis: str,
     progress_desc: str,
     p_values: Sequence[float],
+    n_values: Sequence[int],
+    normalize_by_alpha: bool,
 ) -> tuple[List[SelfishRunResult], List[EpochStat], List[Dict[str, Any]]]:
     p_values = list(p_values)
-    n_values = FIXED_TIME_SCENARIO_N_VALUES
+    n_values = list(n_values)
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
     max_n = max(n_values)
@@ -1597,31 +1775,17 @@ def run_fixed_time_selfish_daa_scenario(
         epoch_rows.extend(epochs)
         checkpoint_rows.extend(checkpoints)
 
-    raw_results.sort(key=lambda r: (float(r.p), int(r.run_id)))
-    epoch_rows.sort(
-        key=lambda e: (float(e.p), int(e.n), int(e.run_id), int(e.epoch_index))
-    )
-    checkpoint_rows.sort(key=lambda c: (float(c.p), int(c.n), int(c.run_id)))
-
-    raw_rows = [r.to_dict() for r in raw_results]
-    raw_fields = list(raw_rows[0].keys()) if raw_rows else []
-    write_csv(out_dir / "raw_runs.csv", raw_rows, raw_fields)
-
-    write_epoch_stats_csv(out_dir, epoch_rows)
-    write_checkpoint_csv(out_dir, checkpoint_rows)
-
-    summary_rows = build_fixed_time_ratio_summary_rows(
-        checkpoint_results=checkpoint_rows,
+    summary_rows = _finalize_fixed_time_results(
+        raw_results=raw_results,
+        epoch_rows=epoch_rows,
+        checkpoint_rows=checkpoint_rows,
+        out_dir=out_dir,
         p_values=p_values,
         n_values=n_values,
-        metric_name=f"A_blocks_canonical_fixedtime_n_round_over_pn{epoch_len}",
         runs=runs,
         epoch_len=epoch_len,
-    )
-    write_csv(
-        out_dir / "summary.csv",
-        summary_rows,
-        ["p", "n", "metric", "metric_mean", "metric_std", "runs"],
+        T=T,
+        normalize_by_alpha=normalize_by_alpha,
     )
     return raw_results, epoch_rows, summary_rows
 
@@ -1650,6 +1814,8 @@ def scenario3_selfish(
         daa_count_basis="canonical",
         progress_desc="scenario3 selfish runs",
         p_values=SCENARIO3_P_VALUES,
+        n_values=SCENARIO3_N_VALUES,
+        normalize_by_alpha=True,
     )
 
 
@@ -1677,6 +1843,8 @@ def scenario4_selfish(
         daa_count_basis="public",
         progress_desc="scenario4 selfish runs",
         p_values=SCENARIO4_P_VALUES,
+        n_values=SCENARIO4_N_VALUES,
+        normalize_by_alpha=False,
     )
 
 
@@ -1759,10 +1927,12 @@ def run_fixed_time_daa_scenario(
     scenario_name: str,
     daa_count_basis: str,
     progress_desc: str,
+    n_values: Sequence[int],
     p_values: Optional[Sequence[float]] = None,
+    normalize_by_alpha: bool = True,
 ) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
     p_values = list(SCENARIO3_P_VALUES if p_values is None else p_values)
-    n_values = FIXED_TIME_SCENARIO_N_VALUES
+    n_values = list(n_values)
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
     max_n = max(n_values)
@@ -1807,31 +1977,17 @@ def run_fixed_time_daa_scenario(
         epoch_rows.extend(epochs)
         checkpoint_rows.extend(checkpoints)
 
-    raw_results.sort(key=lambda r: (float(r.p), int(r.run_id)))
-    epoch_rows.sort(
-        key=lambda e: (float(e.p), int(e.n), int(e.run_id), int(e.epoch_index))
-    )
-    checkpoint_rows.sort(key=lambda c: (float(c.p), int(c.n), int(c.run_id)))
-
-    raw_rows = [r.to_dict() for r in raw_results]
-    raw_fields = list(raw_rows[0].keys()) if raw_rows else []
-    write_csv(out_dir / "raw_runs.csv", raw_rows, raw_fields)
-
-    write_epoch_stats_csv(out_dir, epoch_rows)
-    write_checkpoint_csv(out_dir, checkpoint_rows)
-
-    summary_rows = build_fixed_time_ratio_summary_rows(
-        checkpoint_results=checkpoint_rows,
+    summary_rows = _finalize_fixed_time_results(
+        raw_results=raw_results,
+        epoch_rows=epoch_rows,
+        checkpoint_rows=checkpoint_rows,
+        out_dir=out_dir,
         p_values=p_values,
         n_values=n_values,
-        metric_name=f"A_blocks_canonical_fixedtime_n_round_over_pn{epoch_len}",
         runs=runs,
         epoch_len=epoch_len,
-    )
-    write_csv(
-        out_dir / "summary.csv",
-        summary_rows,
-        ["p", "n", "metric", "metric_mean", "metric_std", "runs"],
+        T=T,
+        normalize_by_alpha=normalize_by_alpha,
     )
     return raw_results, epoch_rows, summary_rows
 
@@ -1861,6 +2017,12 @@ def save_plot_data(fig_dir: Path, stem: str, rows: Sequence[Dict[str, Any]]) -> 
         row_list,
         list(row_list[0].keys()),
     )
+
+
+def _set_fixed_time_axes(ax: Any, n_values: Sequence[int], *, fontsize: int) -> None:
+    ax.set_xticks(n_values)
+    ax.set_xlabel(FIXED_TIME_X_LABEL, fontsize=fontsize)
+    ax.set_ylabel(FIXED_TIME_Y_LABEL, fontsize=fontsize)
 
 
 def plot_fixed_time_ratio(
@@ -1921,10 +2083,8 @@ def plot_fixed_time_ratio(
     ax.axhline(
         1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
     )
-    ax.set_xlabel("Round n", fontsize=12)
-    ax.set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=12)
+    _set_fixed_time_axes(ax, x_ticks, fontsize=12)
     ax.tick_params(labelsize=10)
-    ax.set_xticks(x_ticks)
     ax.set_title(title, fontsize=13)
     ax.legend(loc="best", ncols=2, fontsize=10)
     ax.margins(x=0.03)
@@ -1936,10 +2096,14 @@ def plot_fixed_time_ratio(
     save_plot_data(fig_dir, stem, plot_data_rows)
 
 
-def plot_scenario3(
+def plot_strategy_comparison(
     tbw_summary_rows: Sequence[Dict[str, Any]],
     selfish_summary_rows: Sequence[Dict[str, Any]],
     fig_dir: Path,
+    *,
+    stem: str,
+    title: str,
+    max_columns: int,
 ) -> None:
     plt_mod = get_plt()
     if plt_mod is None:
@@ -1953,66 +2117,101 @@ def plot_scenario3(
 
     p_values = sorted({float(row["p"]) for row in all_rows})
     x_ticks = sorted({int(row["n"]) for row in all_rows})
+    ncols = min(max_columns, len(p_values))
+    nrows = (len(p_values) + ncols - 1) // ncols
     palette = {"OCW": "#155eef", "SM": "#b42318"}
     markers = {"OCW": "o", "SM": "s"}
     plot_data_rows: List[Dict[str, Any]] = []
 
-    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
-    for strategy, source_rows in (
-        ("OCW", tbw_summary_rows),
-        ("SM", selfish_summary_rows),
-    ):
-        rows = sorted(source_rows, key=lambda row: int(row["n"]))
-        if not rows:
-            continue
-
-        x = np.array([int(row["n"]) for row in rows], dtype=int)
-        y = np.array([float(row["metric_mean"]) for row in rows], dtype=float)
-        yerr = np.array([float(row["metric_std"]) for row in rows], dtype=float)
-        ax.errorbar(
-            x,
-            y,
-            yerr=yerr,
-            marker=markers[strategy],
-            capsize=4,
-            linewidth=2.0,
-            elinewidth=1.4,
-            color=palette[strategy],
-            markersize=3.5,
-            markerfacecolor="none",
-            markeredgewidth=1.4,
-            label=strategy,
-        )
-        ax.fill_between(x, y - yerr, y + yerr, color=palette[strategy], alpha=0.08)
-
-        for i in range(len(x)):
-            plot_data_rows.append(
-                {
-                    "strategy": strategy,
-                    "p": float(rows[i]["p"]),
-                    "n": int(x[i]),
-                    "metric_mean": float(y[i]),
-                    "metric_std": float(yerr[i]),
-                }
-            )
-
-    p_label = ", ".join(rf"$\alpha$={p:.2f}" for p in p_values)
-    ax.set_xticks(x_ticks)
-    ax.set_xlabel("Round n", fontsize=12)
-    ax.set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=12)
-    ax.set_title(f"OCW vs SM under Canonical-Chain DAA ({p_label})", fontsize=13)
-    ax.tick_params(labelsize=10)
-    ax.margins(x=0.03)
-    ax.grid(True, linestyle="--", alpha=0.6)
-    ax.axhline(
-        1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
+    fig, axes = plt_mod.subplots(
+        nrows,
+        ncols,
+        figsize=(5.5 * ncols, 4.125 * nrows),
+        squeeze=False,
+        sharey=True,
     )
-    ax.legend(loc="best", fontsize=10)
+    flat_axes = list(axes.flat)
 
+    for index, p in enumerate(p_values):
+        ax = flat_axes[index]
+        for strategy, source_rows in (
+            ("OCW", tbw_summary_rows),
+            ("SM", selfish_summary_rows),
+        ):
+            rows = sorted(
+                [row for row in source_rows if abs(float(row["p"]) - p) < EPS],
+                key=lambda row: int(row["n"]),
+            )
+            if not rows:
+                continue
+
+            x = np.array([int(row["n"]) for row in rows], dtype=int)
+            y = np.array([float(row["metric_mean"]) for row in rows], dtype=float)
+            yerr = np.array([float(row["metric_std"]) for row in rows], dtype=float)
+            ax.errorbar(
+                x,
+                y,
+                yerr=yerr,
+                marker=markers[strategy],
+                capsize=4,
+                linewidth=2.0,
+                elinewidth=1.4,
+                color=palette[strategy],
+                markersize=3.5,
+                markerfacecolor="none",
+                markeredgewidth=1.4,
+                label=strategy,
+            )
+            ax.fill_between(x, y - yerr, y + yerr, color=palette[strategy], alpha=0.08)
+
+            for row_index in range(len(x)):
+                plot_data_rows.append(
+                    {
+                        "strategy": strategy,
+                        "p": p,
+                        "n": int(x[row_index]),
+                        "metric_mean": float(y[row_index]),
+                        "metric_std": float(yerr[row_index]),
+                    }
+                )
+
+        _set_fixed_time_axes(ax, x_ticks, fontsize=12)
+        ax.set_title(rf"$\alpha$={p:.2f}", fontsize=13)
+        ax.tick_params(labelsize=10)
+        ax.margins(x=0.03)
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.axhline(
+            1.0,
+            linestyle="--",
+            color="#344054",
+            linewidth=1.6,
+            label="baseline = 1",
+        )
+        ax.legend(loc="best", fontsize=10)
+
+    for ax in flat_axes[len(p_values) :]:
+        ax.set_visible(False)
+
+    fig.suptitle(title, fontsize=15)
     fig.tight_layout()
-    save_figure_bundle(fig_dir, "s3_fixedtime_ratio", fig)
+    save_figure_bundle(fig_dir, stem, fig)
     plt_mod.close(fig)
-    save_plot_data(fig_dir, "s3_fixedtime_ratio", plot_data_rows)
+    save_plot_data(fig_dir, stem, plot_data_rows)
+
+
+def plot_scenario3(
+    tbw_summary_rows: Sequence[Dict[str, Any]],
+    selfish_summary_rows: Sequence[Dict[str, Any]],
+    fig_dir: Path,
+) -> None:
+    plot_strategy_comparison(
+        tbw_summary_rows,
+        selfish_summary_rows,
+        fig_dir,
+        stem="s3_fixedtime_ratio",
+        title="OCW vs SM under Canonical-Chain DAA",
+        max_columns=2,
+    )
 
 
 def plot_scenario4(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
@@ -2030,94 +2229,14 @@ def plot_scenario4_comparison(
     selfish_summary_rows: Sequence[Dict[str, Any]],
     fig_dir: Path,
 ) -> None:
-    plt_mod = get_plt()
-    if plt_mod is None:
-        return
-    ensure_dir(fig_dir)
-    apply_plot_theme(plt_mod)
-
-    all_rows = list(tbw_summary_rows) + list(selfish_summary_rows)
-    if not all_rows:
-        return
-
-    p_values = sorted({float(row["p"]) for row in all_rows})
-    x_ticks = sorted({int(row["n"]) for row in all_rows})
-    nrows = 2
-    ncols = 2
-    fig, axes = plt_mod.subplots(
-        nrows,
-        ncols,
-        figsize=(5.6 * ncols, 4.35 * nrows),
-        squeeze=False,
-        sharey=True,
+    plot_strategy_comparison(
+        tbw_summary_rows,
+        selfish_summary_rows,
+        fig_dir,
+        stem="s4_fixedtime_ratio_ocw_vs_sm",
+        title="OCW vs SM under Orphan-Aware DAA",
+        max_columns=2,
     )
-    palette = {"OCW": "#155eef", "SM": "#b42318"}
-    markers = {"OCW": "o", "SM": "s"}
-    strategy_order = ["OCW", "SM"]
-    plot_data_rows: List[Dict[str, Any]] = []
-
-    for idx, p in enumerate(p_values):
-        ax = axes[idx // ncols][idx % ncols]
-        for strategy in strategy_order:
-            source_rows = (
-                tbw_summary_rows if strategy == "OCW" else selfish_summary_rows
-            )
-            rows = sorted(
-                [row for row in source_rows if abs(float(row["p"]) - p) < 1e-12],
-                key=lambda row: int(row["n"]),
-            )
-            if not rows:
-                continue
-
-            x = np.array([int(row["n"]) for row in rows], dtype=int)
-            y = np.array([float(row["metric_mean"]) for row in rows], dtype=float)
-            yerr = np.array([float(row["metric_std"]) for row in rows], dtype=float)
-
-            ax.errorbar(
-                x,
-                y,
-                yerr=yerr,
-                marker=markers[strategy],
-                capsize=4,
-                linewidth=2.0,
-                elinewidth=1.4,
-                color=palette[strategy],
-                markersize=3.5,
-                markerfacecolor="none",
-                markeredgewidth=1.4,
-                label=strategy,
-            )
-            ax.fill_between(x, y - yerr, y + yerr, color=palette[strategy], alpha=0.08)
-
-            for i in range(len(x)):
-                plot_data_rows.append(
-                    {
-                        "strategy": strategy,
-                        "p": p,
-                        "n": int(x[i]),
-                        "metric_mean": float(y[i]),
-                        "metric_std": float(yerr[i]),
-                    }
-                )
-
-        ax.set_xticks(x_ticks)
-        ax.set_title(rf"$\alpha$={p:.2f}", fontsize=14)
-        ax.set_xlabel("Round n", fontsize=13)
-        ax.tick_params(labelsize=11)
-        ax.margins(x=0.03)
-        ax.grid(True, linestyle="--", alpha=0.6)
-        ax.axhline(
-            1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
-        )
-        ax.legend(loc="best", fontsize=11)
-
-    axes[0][0].set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=13)
-    axes[1][0].set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=13)
-    fig.suptitle("OCW vs SM under Orphan-Aware DAA", fontsize=17)
-    fig.tight_layout()
-    save_figure_bundle(fig_dir, "s4_fixedtime_ratio_ocw_vs_sm", fig)
-    plt_mod.close(fig)
-    save_plot_data(fig_dir, "s4_fixedtime_ratio_ocw_vs_sm", plot_data_rows)
 
 
 def write_config_summary(
@@ -2141,7 +2260,8 @@ def write_config_summary(
         f"selfish_gamma = {selfish_gamma}",
         f"scenario3_p = {SCENARIO3_P_VALUES}",
         f"scenario4_p = {SCENARIO4_P_VALUES}",
-        f"checkpoint_rounds = {FIXED_TIME_SCENARIO_N_VALUES}",
+        f"scenario3_checkpoint_n = {SCENARIO3_N_VALUES}",
+        f"scenario4_checkpoint_n = {SCENARIO4_N_VALUES}",
         f"DAA: D_new = D_old * ({epoch_len}*T) / T_total",
         "OCW withholding window = 10*T",
     ]
@@ -2223,10 +2343,7 @@ def main() -> None:
     )
     print("  OCW window=10T, Poisson mining, tie by earlier publication")
     print(f"  selfish mining gamma={args.selfish_gamma}")
-    print(
-        "  DAA formula: "
-        f"D_new = D_old * ({args.epoch_len}*T) / T_total"
-    )
+    print("  DAA formula: " f"D_new = D_old * ({args.epoch_len}*T) / T_total")
 
     s3_summary: List[Dict[str, Any]] = []
     s3_selfish_summary: List[Dict[str, Any]] = []

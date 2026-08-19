@@ -6,16 +6,9 @@ epoch_len = 2016
 base_seed = 2026
 jobs = 30
 selfish_gamma = 0.0
-gamma = 0
+scenario3_p = [0.65, 0.75]
+scenario4_p = [0.65, 0.75]
+scenario3_checkpoint_n = [1, 2, 3, 5]
+scenario4_checkpoint_n = [1, 3, 10]
 DAA: D_new = D_old * (2016*T) / T_total
-w*(p, D) = 10*T
-w* values:
-  p=0.55: w*=100.000000
-  p=0.60: w*=100.000000
-  p=0.65: w*=100.000000
-  p=0.70: w*=100.000000
-  p=0.75: w*=100.000000
-  p=0.80: w*=100.000000
-  p=0.85: w*=100.000000
-  p=0.90: w*=100.000000
-  p=0.95: w*=100.000000
+OCW withholding window = 10*T
