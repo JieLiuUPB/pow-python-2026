@@ -13,7 +13,8 @@ class LoadTBWSummaryTests(unittest.TestCase):
             summary_path.write_text(
                 "\n".join(
                     [
-                        "p,runs,A_share_mean,A_share_std,orphan_rate_mean,orphan_rate_std,chain_extensions_mean",
+                        "p,runs,A_share_mean,A_share_std,orphan_rate_mean,"
+                        "orphan_rate_std,chain_extensions_mean",
                         "0.70,100,0.78,0.01,0.128,0.005,980",
                         "0.55,100,0.57,0.02,0.119,0.004,610",
                     ]
@@ -74,7 +75,8 @@ class MainSmokeTests(unittest.TestCase):
             tbw_summary.write_text(
                 "\n".join(
                     [
-                        "p,runs,A_share_mean,A_share_std,orphan_rate_mean,orphan_rate_std,chain_extensions_mean",
+                        "p,runs,A_share_mean,A_share_std,orphan_rate_mean,"
+                        "orphan_rate_std,chain_extensions_mean",
                         "0.55,100,0.57,0.02,0.119,0.004,610",
                         "0.70,100,0.78,0.01,0.128,0.005,980",
                     ]

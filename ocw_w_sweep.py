@@ -1,13 +1,12 @@
 """
 Standalone OCW withholding-window sweep experiment.
 
-This script reuses the repository's existing OCW attack simulator from
-`pow_chain_withhold.py`, but replaces the fixed withholding window with a
-configurable value `w`. It sweeps over several normalized windows `w/T` for two
+This script reuses the configurable OCW attack simulator from
+`pow_chain_withhold.py`. It sweeps over several normalized windows `w/T` for two
 fixed attacker hashrates (alpha = 0.65 and 0.75), saves raw and aggregated CSV
 outputs, and generates one paper-style figure with two horizontal subplots:
 
-1. attacker relative canonical share vs. w/T
+1. attacker canonical block share vs. w/T
 2. orphan rate vs. w/T
 
 The simulation points use 95% confidence intervals computed as
@@ -37,23 +36,12 @@ import matplotlib.pyplot as plt
 from pow_chain_withhold import ChainWithholdSimulation
 
 DEFAULT_ALPHA_LIST = (0.65, 0.75)
-DEFAULT_W_OVER_T_LIST = (0.0, 0.25,0.5, 1.0, 2.0, 5.0, 10.0)
+DEFAULT_W_OVER_T_LIST = (0.0, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)
 DEFAULT_T = 10.0
 DEFAULT_REPEATS = 50
 DEFAULT_TARGET_BLOCKS = 2016
 DEFAULT_BASE_SEED = 2026
 DEFAULT_JOBS = 30
-
-
-class VariableWindowOCWSimulation(ChainWithholdSimulation):
-    """Reuse the existing OCW simulator while overriding only the window length."""
-
-    def __init__(self, *, withholding_window: float, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.withholding_window = float(withholding_window)
-
-    def _w_star(self) -> float:
-        return self.withholding_window
 
 
 def ocw_profit_theory(alpha: float, w_over_t: float) -> float:
@@ -64,7 +52,7 @@ def ocw_profit_theory(alpha: float, w_over_t: float) -> float:
     original fixed-window OCW limit (w/T -> inf).
     """
     s = 1.0 - math.exp(-w_over_t)
-    return alpha*(1-s) + alpha * (3 - 2*alpha) * alpha * s
+    return alpha * (1.0 - s) + alpha**2 * (3.0 - 2.0 * alpha) * s
 
 
 def ocw_orphan_theory(alpha: float, w_over_t: float) -> float:
@@ -85,7 +73,10 @@ def ci95(values: Sequence[float]) -> float:
 
 
 def parse_float_list(raw: str) -> List[float]:
-    return [float(part.strip()) for part in raw.split(",") if part.strip()]
+    values = [float(part.strip()) for part in raw.split(",") if part.strip()]
+    if not values:
+        raise ValueError("list must not be empty")
+    return values
 
 
 def derive_seed(base_seed: int, alpha: float, w_over_t: float, run_id: int) -> int:
@@ -103,8 +94,7 @@ def write_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(row_list[0].keys()))
         writer.writeheader()
-        for row in row_list:
-            writer.writerow(row)
+        writer.writerows(row_list)
 
 
 def run_one(
@@ -117,20 +107,17 @@ def run_one(
     target_blocks: int,
     max_events: Optional[int],
 ) -> Dict[str, Any]:
-    w_value = w_over_t * T
-    sim = VariableWindowOCWSimulation(
+    simulation = ChainWithholdSimulation(
         T=T,
         p=alpha,
         seed=seed,
         target_blocks=target_blocks,
         run_id=run_id,
         max_events=max_events,
-        withholding_window=w_value,
+        w_over_T=w_over_t,
     )
-    row = sim.run().to_dict()
+    row = simulation.run().to_dict()
     row["alpha"] = alpha
-    row["w_over_T"] = w_over_t
-    row["w"] = w_value
     row["profit_theory"] = ocw_profit_theory(alpha, w_over_t)
     row["orphan_theory"] = ocw_orphan_theory(alpha, w_over_t)
     return row
@@ -179,6 +166,23 @@ def run_experiments(
     jobs: int,
     max_events: Optional[int],
 ) -> List[Dict[str, Any]]:
+    if T <= 0.0:
+        raise ValueError("T must be positive")
+    if repeats <= 0:
+        raise ValueError("repeats must be positive")
+    if target_blocks <= 0:
+        raise ValueError("target_blocks must be positive")
+    if jobs <= 0:
+        raise ValueError("jobs must be positive")
+    if not alpha_list:
+        raise ValueError("alpha_list must not be empty")
+    if not w_over_t_list:
+        raise ValueError("w_over_t_list must not be empty")
+    if any(not 0.0 < alpha < 1.0 for alpha in alpha_list):
+        raise ValueError("all alpha values must be in (0, 1)")
+    if any(w_over_t < 0.0 for w_over_t in w_over_t_list):
+        raise ValueError("all w/T values must be non-negative")
+
     tasks = build_tasks(
         alpha_list,
         w_over_t_list,
@@ -191,7 +195,7 @@ def run_experiments(
     if not tasks:
         return []
 
-    effective_jobs = max(1, min(jobs, len(tasks)))
+    effective_jobs = min(jobs, len(tasks))
     rows: List[Dict[str, Any]] = []
 
     if effective_jobs == 1:
@@ -201,13 +205,21 @@ def run_experiments(
         try:
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=effective_jobs
-            ) as ex:
-                rows = list(ex.map(_task_star, tasks))
+            ) as executor:
+                rows = list(executor.map(_task_star, tasks))
         except (OSError, PermissionError):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=effective_jobs) as ex:
-                rows = list(ex.map(_task_star, tasks))
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=effective_jobs
+            ) as executor:
+                rows = list(executor.map(_task_star, tasks))
 
-    rows.sort(key=lambda row: (float(row["alpha"]), float(row["w_over_T"]), int(row["run_id"])))
+    rows.sort(
+        key=lambda row: (
+            float(row["alpha"]),
+            float(row["w_over_T"]),
+            int(row["run_id"]),
+        )
+    )
     return rows
 
 
@@ -242,12 +254,18 @@ def summarize(raw_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return summary_rows
 
 
-def build_dense_theory(alpha: float, max_w_over_t: float = 10.0) -> Dict[str, np.ndarray]:
+def build_dense_theory(
+    alpha: float, max_w_over_t: float = 10.0
+) -> Dict[str, np.ndarray]:
     x = np.linspace(0.0, max_w_over_t, 400)
     return {
         "w_over_T": x,
-        "profit": np.array([ocw_profit_theory(alpha, float(v)) for v in x], dtype=float),
-        "orphan": np.array([ocw_orphan_theory(alpha, float(v)) for v in x], dtype=float),
+        "profit": np.array(
+            [ocw_profit_theory(alpha, float(value)) for value in x], dtype=float
+        ),
+        "orphan": np.array(
+            [ocw_orphan_theory(alpha, float(value)) for value in x], dtype=float
+        ),
     }
 
 
@@ -273,8 +291,12 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], output_base: Path) -> N
         x = np.array([float(row["w_over_T"]) for row in rows], dtype=float)
         profit_mean = np.array([float(row["profit_mean"]) for row in rows], dtype=float)
         profit_ci = np.array([float(row["profit_ci95"]) for row in rows], dtype=float)
-        orphan_mean = np.array([float(row["orphan_rate_mean"]) for row in rows], dtype=float)
-        orphan_ci = np.array([float(row["orphan_rate_ci95"]) for row in rows], dtype=float)
+        orphan_mean = np.array(
+            [float(row["orphan_rate_mean"]) for row in rows], dtype=float
+        )
+        orphan_ci = np.array(
+            [float(row["orphan_rate_ci95"]) for row in rows], dtype=float
+        )
 
         style = style_map.get(
             alpha,
@@ -325,9 +347,9 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], output_base: Path) -> N
             label=rf"Sim, {alpha_label}",
         )
 
-    profit_ax.set_title("(a) Attacker Relative Canonical Share")
+    profit_ax.set_title("(a) Attacker Block Share")
     profit_ax.set_xlabel(r"$w/T$")
-    profit_ax.set_ylabel("Attacker relative canonical share")
+    profit_ax.set_ylabel("Attacker Block Share")
     profit_ax.grid(True, linestyle=":", linewidth=0.8)
     profit_ax.set_xlim(-0.1, 10.1)
 
@@ -341,7 +363,12 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], output_base: Path) -> N
     orphan_ax.legend(loc="lower right", fontsize=9, frameon=True)
 
     output_base.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_base.with_suffix(".pdf"), format="pdf", dpi=300, bbox_inches="tight")
+    fig.savefig(
+        output_base.with_suffix(".pdf"),
+        format="pdf",
+        dpi=300,
+        bbox_inches="tight",
+    )
     fig.savefig(output_base.with_suffix(".png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -365,10 +392,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--T", type=float, default=DEFAULT_T)
     parser.add_argument("--runs", type=int, default=DEFAULT_REPEATS)
-    parser.add_argument("--alpha-list", default=",".join(str(v) for v in DEFAULT_ALPHA_LIST))
+    parser.add_argument(
+        "--alpha-list", default=",".join(str(value) for value in DEFAULT_ALPHA_LIST)
+    )
     parser.add_argument(
         "--w-over-T-list",
-        default=",".join(str(v) for v in DEFAULT_W_OVER_T_LIST),
+        default=",".join(str(value) for value in DEFAULT_W_OVER_T_LIST),
     )
     parser.add_argument("--target-blocks", type=int, default=DEFAULT_TARGET_BLOCKS)
     parser.add_argument("--base-seed", type=int, default=DEFAULT_BASE_SEED)
@@ -388,7 +417,8 @@ def main() -> None:
     output_dir = Path(args.output_dir)
 
     print(
-        f"ocw_w_sweep: T={args.T}, runs={args.runs}, target_blocks={args.target_blocks}, jobs={args.jobs}"
+        f"ocw_w_sweep: T={args.T}, runs={args.runs}, "
+        f"target_blocks={args.target_blocks}, jobs={args.jobs}"
     )
     print(f"alpha_list = {alpha_list}")
     print(f"w_over_T_list = {w_over_t_list}")

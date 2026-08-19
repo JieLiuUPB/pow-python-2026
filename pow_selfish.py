@@ -1,9 +1,12 @@
+"""Classic Eyal--Sirer selfish-mining baseline without difficulty adjustment."""
+
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import csv
 import hashlib
+import itertools
 import math
 import os
 import random
@@ -28,9 +31,8 @@ except ModuleNotFoundError:  # pragma: no cover - optional at runtime
     tqdm = None
 
 matplotlib.use("Agg", force=True)
-import itertools
-import scienceplots  # noqa: F401
 import matplotlib.pyplot as plt
+import scienceplots  # noqa: F401
 
 # Centralized defaults for easy modification.
 P_LIST = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
@@ -283,8 +285,7 @@ def write_csv_rows(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(row_list[0].keys()))
         writer.writeheader()
-        for row in row_list:
-            writer.writerow(row)
+        writer.writerows(row_list)
 
 
 def _safe_mean(values: Sequence[float]) -> float:
@@ -363,6 +364,10 @@ def apply_plot_theme() -> None:
 
 
 def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> None:
+    if not summary_rows:
+        print("[warn] empty summary, skip plotting")
+        return
+
     ensure_dir(figures_dir)
 
     p_values = np.array([float(row["p"]) for row in summary_rows], dtype=float)
@@ -393,7 +398,7 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         linewidth=2.0,
         markersize=3,
         markerfacecolor="none",
-        label="mean revenue_share",
+        label="Selfish Mining",
     )
     ax.plot(
         p_values,
@@ -406,14 +411,13 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         label="y = x",
     )
     ax.set_xlabel("Attacker hashrate p", fontsize=12)
-    ax.set_ylabel("Revenue share", fontsize=12)
+    ax.set_ylabel("Attacker Block Share", fontsize=12)
     ax.tick_params(labelsize=10)
-    ax.set_title("Selfish Mining: Revenue Share vs p")
+    ax.set_title("Selfish Mining: Attacker Block Share vs p")
     ax.legend(loc="best", fontsize=10)
     ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     fig.savefig(figures_dir / "revenue_share_vs_p.pdf", format="pdf", dpi=300)
-    plt.show()
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(5.5, 4.125))
@@ -426,7 +430,7 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         linewidth=2.0,
         markersize=3,
         markerfacecolor="none",
-        label="mean orphan_rate",
+        label="Selfish Mining",
     )
     ax.set_xlabel("Attacker hashrate p", fontsize=12)
     ax.set_ylabel("Orphan rate", fontsize=12)
@@ -436,7 +440,6 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
     ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     fig.savefig(figures_dir / "orphan_rate_vs_p.pdf", format="pdf", dpi=300)
-    plt.show()
     plt.close(fig)
 
 

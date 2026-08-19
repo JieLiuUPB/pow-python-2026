@@ -1,10 +1,11 @@
+"""Event-driven OCW and selfish-mining experiments with optional DAA."""
+
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import csv
 import hashlib
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, stdev
@@ -40,9 +41,9 @@ def get_plt():  # pragma: no cover - plotting is optional at runtime
 
 
 EPS = 1e-12
-FIXED_TIME_SCENARIO_P_VALUES = [0.65, 0.75, 0.85]
+SCENARIO3_P_VALUES = [0.65]
 SCENARIO4_P_VALUES = [0.55, 0.65, 0.75, 0.85]
-FIXED_TIME_SCENARIO_N_VALUES = [1, 2, 3, 5]
+FIXED_TIME_SCENARIO_N_VALUES = [1, 3, 5, 7]
 SELFISH_GAMMA = 0.0
 
 
@@ -61,13 +62,11 @@ class PrivateBlock:
     parent_id: int
     height: int
     miner: str
-    t_mine: float
 
 
 @dataclass
 class AttackerState:
     state: str = "IDLE"  # IDLE | WITHHOLD | RACE
-    base_height: Optional[int] = None
     private_bn: Optional[PrivateBlock] = None
     deadline: Optional[float] = None
     race_tip_id: Optional[int] = None
@@ -258,6 +257,14 @@ class TBWSimulation:
         self.run_id = run_id
         self.n_value = n_value
         self.max_events = max_events
+        if self.T <= 0.0:
+            raise ValueError("T must be positive")
+        if not 0.0 < self.p < 1.0:
+            raise ValueError("p must be in (0, 1)")
+        if self.epoch_len <= 0:
+            raise ValueError("epoch_len must be positive")
+        if self.max_events is not None and self.max_events <= 0:
+            raise ValueError("max_events must be positive when provided")
         if daa_count_basis not in {"canonical", "public"}:
             raise ValueError(
                 f"daa_count_basis must be 'canonical' or 'public', got {daa_count_basis!r}"
@@ -414,14 +421,6 @@ class TBWSimulation:
         self._publish_block(block)
         return bid
 
-    def _is_descendant(self, child_id: int, ancestor_id: int) -> bool:
-        cur: Optional[int] = child_id
-        while cur is not None:
-            if cur == ancestor_id:
-                return True
-            cur = self.blocks_by_id[cur].parent_id
-        return False
-
     def _reset_attacker(self) -> None:
         self.attacker = AttackerState()
 
@@ -436,10 +435,8 @@ class TBWSimulation:
                 parent_id=parent_tip,
                 height=parent.height + 1,
                 miner="A",
-                t_mine=self.t,
             )
             self.attacker.state = "WITHHOLD"
-            self.attacker.base_height = parent.height
             self.attacker.private_bn = private_bn
             self.attacker.deadline = self.t + self._w_star()
             self.attacker.race_tip_id = None
@@ -473,9 +470,7 @@ class TBWSimulation:
                 parent_id=bn.id,
                 height=bn.height + 1,
                 miner="A",
-                t_mine=self.t,
             )
-            self.attacker.base_height = bn.height
             self.attacker.private_bn = bn1
             self.attacker.deadline = self.t + self._w_star()
             self.counters.success_2blocks += 1
@@ -764,13 +759,16 @@ class SelfishMiningDAASimulation:
         self.scenario = scenario
         self.run_id = run_id
         self.n_value = n_value
+        if self.T <= 0.0:
+            raise ValueError("T must be positive")
+        if not 0.0 < self.p < 1.0:
+            raise ValueError("p must be in (0, 1)")
+        if self.epoch_len <= 0:
+            raise ValueError("epoch_len must be positive")
         if not (0.0 <= self.gamma <= 1.0):
             raise ValueError("gamma must be in [0, 1]")
-        if daa_count_basis != "public":
-            raise ValueError(
-                "SelfishMiningDAASimulation currently supports only "
-                f"daa_count_basis='public', got {daa_count_basis!r}"
-            )
+        if daa_count_basis not in {"canonical", "public"}:
+            raise ValueError("daa_count_basis must be 'canonical' or 'public'")
         self.daa_count_basis = daa_count_basis
         self.rng = np.random.default_rng(self.seed)
 
@@ -925,7 +923,6 @@ class SelfishMiningDAASimulation:
                 parent_id=parent_id,
                 height=parent_height + 1,
                 miner="A",
-                t_mine=self.t,
             )
         )
 
@@ -985,7 +982,10 @@ class SelfishMiningDAASimulation:
         if not self.enable_daa:
             return
 
-        daa_block_ids = self.published_block_ids
+        if self.daa_count_basis == "canonical":
+            daa_block_ids = self.canonical_chain_ids
+        else:
+            daa_block_ids = self.published_block_ids
         while len(daa_block_ids) >= (self.epochs_completed + 1) * self.epoch_len:
             epoch_index = self.epochs_completed + 1
             boundary_len = epoch_index * self.epoch_len
@@ -1133,8 +1133,7 @@ def write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) -> 
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+        writer.writerows(rows)
 
 
 def aggregate_metric(values: List[float]) -> tuple[float, float]:
@@ -1148,6 +1147,19 @@ def aggregate_metric(values: List[float]) -> tuple[float, float]:
 def validate_jobs(jobs: int) -> None:
     if jobs <= 0:
         raise ValueError("jobs must be positive")
+
+
+def validate_runner_inputs(
+    *, T: float, runs: int, epoch_len: int, selfish_gamma: float
+) -> None:
+    if T <= 0.0:
+        raise ValueError("T must be positive")
+    if runs <= 0:
+        raise ValueError("runs must be positive")
+    if epoch_len <= 0:
+        raise ValueError("epoch_len must be positive")
+    if not 0.0 <= selfish_gamma <= 1.0:
+        raise ValueError("selfish_gamma must be in [0, 1]")
 
 
 def _run_tbw_task(
@@ -1464,6 +1476,7 @@ def scenario3(
         scenario_name="scenario3_daa_by_time",
         daa_count_basis="canonical",
         progress_desc="scenario3 runs",
+        p_values=SCENARIO3_P_VALUES,
     )
 
 
@@ -1474,11 +1487,15 @@ def build_fixed_time_ratio_summary_rows(
     n_values: Sequence[int],
     metric_name: str,
     runs: int,
+    epoch_len: int = 2016,
 ) -> List[Dict[str, Any]]:
+    if epoch_len <= 0:
+        raise ValueError("epoch_len must be positive")
+
     summary_rows: List[Dict[str, Any]] = []
     for p in p_values:
         for n_value in n_values:
-            baseline = p * n_value * 2016.0
+            baseline = p * n_value * epoch_len
             values = [
                 checkpoint.A_blocks_canonical / baseline
                 for checkpoint in checkpoint_results
@@ -1523,7 +1540,7 @@ def scenario4(
     )
 
 
-def scenario4_selfish(
+def run_fixed_time_selfish_daa_scenario(
     *,
     T: float,
     runs: int,
@@ -1533,10 +1550,13 @@ def scenario4_selfish(
     results_root: Path,
     jobs: int,
     show_progress: bool,
+    scenario_name: str,
+    daa_count_basis: str,
+    progress_desc: str,
+    p_values: Sequence[float],
 ) -> tuple[List[SelfishRunResult], List[EpochStat], List[Dict[str, Any]]]:
-    p_values = SCENARIO4_P_VALUES
+    p_values = list(p_values)
     n_values = FIXED_TIME_SCENARIO_N_VALUES
-    scenario_name = "scenario4_selfish_public_daa_by_time"
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
     max_n = max(n_values)
@@ -1557,7 +1577,7 @@ def scenario4_selfish(
                     scenario_name,
                     run_id,
                     max_n,
-                    "public",
+                    daa_count_basis,
                     checkpoint_times,
                 )
             )
@@ -1566,7 +1586,7 @@ def scenario4_selfish(
         tasks,
         jobs=jobs,
         show_progress=show_progress,
-        progress_desc="scenario4 selfish runs",
+        progress_desc=progress_desc,
     )
 
     raw_results: List[SelfishRunResult] = []
@@ -1594,8 +1614,9 @@ def scenario4_selfish(
         checkpoint_results=checkpoint_rows,
         p_values=p_values,
         n_values=n_values,
-        metric_name="A_blocks_canonical_fixedtime_n_round_over_pn2016",
+        metric_name=f"A_blocks_canonical_fixedtime_n_round_over_pn{epoch_len}",
         runs=runs,
+        epoch_len=epoch_len,
     )
     write_csv(
         out_dir / "summary.csv",
@@ -1603,6 +1624,60 @@ def scenario4_selfish(
         ["p", "n", "metric", "metric_mean", "metric_std", "runs"],
     )
     return raw_results, epoch_rows, summary_rows
+
+
+def scenario3_selfish(
+    *,
+    T: float,
+    runs: int,
+    epoch_len: int,
+    base_seed: int,
+    gamma: float,
+    results_root: Path,
+    jobs: int,
+    show_progress: bool,
+) -> tuple[List[SelfishRunResult], List[EpochStat], List[Dict[str, Any]]]:
+    return run_fixed_time_selfish_daa_scenario(
+        T=T,
+        runs=runs,
+        epoch_len=epoch_len,
+        base_seed=base_seed,
+        gamma=gamma,
+        results_root=results_root,
+        jobs=jobs,
+        show_progress=show_progress,
+        scenario_name="scenario3_selfish_daa_by_time",
+        daa_count_basis="canonical",
+        progress_desc="scenario3 selfish runs",
+        p_values=SCENARIO3_P_VALUES,
+    )
+
+
+def scenario4_selfish(
+    *,
+    T: float,
+    runs: int,
+    epoch_len: int,
+    base_seed: int,
+    gamma: float,
+    results_root: Path,
+    jobs: int,
+    show_progress: bool,
+) -> tuple[List[SelfishRunResult], List[EpochStat], List[Dict[str, Any]]]:
+    return run_fixed_time_selfish_daa_scenario(
+        T=T,
+        runs=runs,
+        epoch_len=epoch_len,
+        base_seed=base_seed,
+        gamma=gamma,
+        results_root=results_root,
+        jobs=jobs,
+        show_progress=show_progress,
+        scenario_name="scenario4_selfish_public_daa_by_time",
+        daa_count_basis="public",
+        progress_desc="scenario4 selfish runs",
+        p_values=SCENARIO4_P_VALUES,
+    )
 
 
 def write_epoch_stats_csv(out_dir: Path, epoch_rows: Sequence[EpochStat]) -> None:
@@ -1686,7 +1761,7 @@ def run_fixed_time_daa_scenario(
     progress_desc: str,
     p_values: Optional[Sequence[float]] = None,
 ) -> tuple[List[RunResult], List[EpochStat], List[Dict[str, Any]]]:
-    p_values = list(FIXED_TIME_SCENARIO_P_VALUES if p_values is None else p_values)
+    p_values = list(SCENARIO3_P_VALUES if p_values is None else p_values)
     n_values = FIXED_TIME_SCENARIO_N_VALUES
     out_dir = results_root / scenario_name
     ensure_dir(out_dir)
@@ -1749,8 +1824,9 @@ def run_fixed_time_daa_scenario(
         checkpoint_results=checkpoint_rows,
         p_values=p_values,
         n_values=n_values,
-        metric_name="A_blocks_canonical_fixedtime_n_round_over_pn2016",
+        metric_name=f"A_blocks_canonical_fixedtime_n_round_over_pn{epoch_len}",
         runs=runs,
+        epoch_len=epoch_len,
     )
     write_csv(
         out_dir / "summary.csv",
@@ -1846,7 +1922,7 @@ def plot_fixed_time_ratio(
         1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
     )
     ax.set_xlabel("Round n", fontsize=12)
-    ax.set_ylabel("mean( A_share_sim / A_share_honest )", fontsize=12)
+    ax.set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=12)
     ax.tick_params(labelsize=10)
     ax.set_xticks(x_ticks)
     ax.set_title(title, fontsize=13)
@@ -1856,19 +1932,87 @@ def plot_fixed_time_ratio(
 
     fig.tight_layout()
     save_figure_bundle(fig_dir, stem, fig)
-    plt_mod.show()
     plt_mod.close(fig)
     save_plot_data(fig_dir, stem, plot_data_rows)
 
 
-def plot_scenario3(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
-    plot_fixed_time_ratio(
-        summary_rows,
-        fig_dir,
-        stem="s3_fixedtime_ratio",
-        title="Fixed-Time Ratio with Canonical-Chain DAA",
-        param_symbol=r"\alpha",
+def plot_scenario3(
+    tbw_summary_rows: Sequence[Dict[str, Any]],
+    selfish_summary_rows: Sequence[Dict[str, Any]],
+    fig_dir: Path,
+) -> None:
+    plt_mod = get_plt()
+    if plt_mod is None:
+        return
+    ensure_dir(fig_dir)
+    apply_plot_theme(plt_mod)
+
+    all_rows = list(tbw_summary_rows) + list(selfish_summary_rows)
+    if not all_rows:
+        return
+
+    p_values = sorted({float(row["p"]) for row in all_rows})
+    x_ticks = sorted({int(row["n"]) for row in all_rows})
+    palette = {"OCW": "#155eef", "SM": "#b42318"}
+    markers = {"OCW": "o", "SM": "s"}
+    plot_data_rows: List[Dict[str, Any]] = []
+
+    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
+    for strategy, source_rows in (
+        ("OCW", tbw_summary_rows),
+        ("SM", selfish_summary_rows),
+    ):
+        rows = sorted(source_rows, key=lambda row: int(row["n"]))
+        if not rows:
+            continue
+
+        x = np.array([int(row["n"]) for row in rows], dtype=int)
+        y = np.array([float(row["metric_mean"]) for row in rows], dtype=float)
+        yerr = np.array([float(row["metric_std"]) for row in rows], dtype=float)
+        ax.errorbar(
+            x,
+            y,
+            yerr=yerr,
+            marker=markers[strategy],
+            capsize=4,
+            linewidth=2.0,
+            elinewidth=1.4,
+            color=palette[strategy],
+            markersize=3.5,
+            markerfacecolor="none",
+            markeredgewidth=1.4,
+            label=strategy,
+        )
+        ax.fill_between(x, y - yerr, y + yerr, color=palette[strategy], alpha=0.08)
+
+        for i in range(len(x)):
+            plot_data_rows.append(
+                {
+                    "strategy": strategy,
+                    "p": float(rows[i]["p"]),
+                    "n": int(x[i]),
+                    "metric_mean": float(y[i]),
+                    "metric_std": float(yerr[i]),
+                }
+            )
+
+    p_label = ", ".join(rf"$\alpha$={p:.2f}" for p in p_values)
+    ax.set_xticks(x_ticks)
+    ax.set_xlabel("Round n", fontsize=12)
+    ax.set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=12)
+    ax.set_title(f"OCW vs SM under Canonical-Chain DAA ({p_label})", fontsize=13)
+    ax.tick_params(labelsize=10)
+    ax.margins(x=0.03)
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.axhline(
+        1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
     )
+    ax.legend(loc="best", fontsize=10)
+
+    fig.tight_layout()
+    save_figure_bundle(fig_dir, "s3_fixedtime_ratio", fig)
+    plt_mod.close(fig)
+    save_plot_data(fig_dir, "s3_fixedtime_ratio", plot_data_rows)
 
 
 def plot_scenario4(summary_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
@@ -1967,12 +2111,11 @@ def plot_scenario4_comparison(
         )
         ax.legend(loc="best", fontsize=11)
 
-    axes[0][0].set_ylabel("mean( A_share_sim / A_share_honest )", fontsize=13)
-    axes[1][0].set_ylabel("mean( A_share_sim / A_share_honest )", fontsize=13)
+    axes[0][0].set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=13)
+    axes[1][0].set_ylabel(r"Attacker Block Share / $\alpha$", fontsize=13)
     fig.suptitle("OCW vs SM under Orphan-Aware DAA", fontsize=17)
     fig.tight_layout()
     save_figure_bundle(fig_dir, "s4_fixedtime_ratio_ocw_vs_sm", fig)
-    plt_mod.show()
     plt_mod.close(fig)
     save_plot_data(fig_dir, "s4_fixedtime_ratio_ocw_vs_sm", plot_data_rows)
 
@@ -1987,7 +2130,6 @@ def write_config_summary(
     jobs: int,
     selfish_gamma: float,
 ) -> None:
-    p_values = [round(x, 2) for x in np.arange(0.55, 0.951, 0.05)]
     lines = [
         "TBW PoW Simulation Configuration",
         "================================",
@@ -1997,14 +2139,12 @@ def write_config_summary(
         f"base_seed = {base_seed}",
         f"jobs = {jobs}",
         f"selfish_gamma = {selfish_gamma}",
-        "gamma = 0",
-        "DAA: D_new = D_old * (2016*T) / T_total",
-        "w*(p, D) = 10*T",
-        "w* values:",
+        f"scenario3_p = {SCENARIO3_P_VALUES}",
+        f"scenario4_p = {SCENARIO4_P_VALUES}",
+        f"checkpoint_rounds = {FIXED_TIME_SCENARIO_N_VALUES}",
+        f"DAA: D_new = D_old * ({epoch_len}*T) / T_total",
+        "OCW withholding window = 10*T",
     ]
-    for p in p_values:
-        w_star = 10.0 * T
-        lines.append(f"  p={p:.2f}: w*={w_star:.6f}")
 
     ensure_dir(path.parent)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -2050,11 +2190,17 @@ def main() -> None:
         "--selfish-gamma",
         type=float,
         default=SELFISH_GAMMA,
-        help="tie-breaking gamma for selfish mining in scenario 4 comparison",
+        help="tie-breaking gamma for selfish mining comparisons",
     )
 
     args = parser.parse_args()
     validate_jobs(args.jobs)
+    validate_runner_inputs(
+        T=args.T,
+        runs=args.runs,
+        epoch_len=args.epoch_len,
+        selfish_gamma=args.selfish_gamma,
+    )
 
     scenarios = parse_scenarios(args.scenarios)
     results_dir = Path(args.results_dir)
@@ -2075,11 +2221,15 @@ def main() -> None:
         f"  T={args.T}, runs={args.runs}, epoch_len={args.epoch_len}, "
         f"base_seed={args.base_seed}, jobs={args.jobs}"
     )
-    print("  gamma=0, private lead<=1, Poisson mining, tie by earlier t_publish")
+    print("  OCW window=10T, Poisson mining, tie by earlier publication")
     print(f"  selfish mining gamma={args.selfish_gamma}")
-    print("  DAA formula: D_new = D_old * (2016*T) / T_total")
+    print(
+        "  DAA formula: "
+        f"D_new = D_old * ({args.epoch_len}*T) / T_total"
+    )
 
     s3_summary: List[Dict[str, Any]] = []
+    s3_selfish_summary: List[Dict[str, Any]] = []
     s4_summary: List[Dict[str, Any]] = []
     s4_selfish_summary: List[Dict[str, Any]] = []
     if "3" in scenarios:
@@ -2092,7 +2242,18 @@ def main() -> None:
             jobs=args.jobs,
             show_progress=not args.no_progress,
         )
+        _, _, s3_selfish_summary = scenario3_selfish(
+            T=args.T,
+            runs=args.runs,
+            epoch_len=args.epoch_len,
+            base_seed=args.base_seed,
+            gamma=args.selfish_gamma,
+            results_root=results_dir,
+            jobs=args.jobs,
+            show_progress=not args.no_progress,
+        )
         print("Scenario 3 completed")
+        print("Scenario 3 selfish comparison completed")
 
     if "4" in scenarios:
         _, _, s4_summary = scenario4(
@@ -2121,8 +2282,8 @@ def main() -> None:
         if get_plt() is None:
             print("matplotlib unavailable, skipped plotting")
         else:
-            if s3_summary:
-                plot_scenario3(s3_summary, figures_dir)
+            if s3_summary and s3_selfish_summary:
+                plot_scenario3(s3_summary, s3_selfish_summary, figures_dir)
             if s4_summary:
                 plot_scenario4(s4_summary, figures_dir)
             if s4_summary and s4_selfish_summary:

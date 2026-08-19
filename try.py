@@ -1,35 +1,54 @@
-import math
+"""Plot a small analytical expression used for quick formula checks."""
 
-import matplotlib.pyplot as plt
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/codex-matplotlib-cache")
+
+import matplotlib
 import numpy as np
 
-
-def y(p):
-    return p * p * (1 - p) / (1 + p)
-
-
-for p in [0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]:
-    # print(0.5 * (1 - p) * (1.0 - (2.0 * (1.0 - p)) ** (1.0 / p)))
-    print(p, y(p))
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
 
 
-p_values = np.linspace(0.51, 0.95, 200)
+def analytical_term(p: float) -> float:
+    """Return p^2(1-p)/(1+p)."""
+    if not 0.0 < p < 1.0:
+        raise ValueError("p must be in (0, 1)")
+    return p**2 * (1.0 - p) / (1.0 + p)
 
-# 计算两个函数的值
-y_once = [p - pf_once(p) for p in p_values]
 
-# 绘图
-plt.figure(figsize=(10, 6))
-plt.plot(p_values, y_once, label="pf_once(p)", linestyle="--", linewidth=2)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("figures/analytical_term.png"),
+        help="output PNG path",
+    )
+    return parser
 
-# 图表装饰
-plt.xlabel("p", fontsize=12)
-plt.ylabel("p_f", fontsize=12)
-plt.title("Comparison of $p_f$ Boundary Functions ($0.5 < p < 1$)", fontsize=14)
-plt.legend()
-plt.grid(True, linestyle=":", alpha=0.7)
 
-# 限制 y 轴范围，防止 pf_once 的极端值破坏图像比例
-plt.ylim(0.1, 0.5)
+def main() -> None:
+    args = build_parser().parse_args()
+    p_values = np.linspace(0.51, 0.95, 200)
+    values = np.array([analytical_term(float(p)) for p in p_values])
 
-# plt.show()
+    fig, ax = plt.subplots(figsize=(5.5, 4.125))
+    ax.plot(p_values, values, linewidth=2)
+    ax.set(xlabel="p", ylabel=r"$p^2(1-p)/(1+p)$", title="Analytical Check")
+    ax.grid(True, linestyle=":", alpha=0.7)
+    fig.tight_layout()
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(args.output, dpi=300)
+    plt.close(fig)
+    print(f"saved figure to {args.output}")
+
+
+if __name__ == "__main__":
+    main()

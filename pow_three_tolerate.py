@@ -1,7 +1,8 @@
+"""Minimal runner for the three-pool BetrayTolerated scenario."""
+
 from __future__ import annotations
 
 import argparse
-import math
 from statistics import mean
 
 from pow_collusion import (
@@ -9,7 +10,7 @@ from pow_collusion import (
     build_scenarios,
     parse_pool_spec,
     run_experiment,
-    run_option_a_unit_tests,
+    validate_inputs,
     validate_jobs,
 )
 
@@ -47,49 +48,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def validate_three_only(
-    sim_config: SimConfig, three_pools_spec: str, traitor: str
-) -> None:
-    if sim_config.T <= 0:
-        raise ValueError("T must be > 0")
-    if not (0.0 <= sim_config.gamma <= 1.0):
-        raise ValueError("gamma must be in [0, 1]")
-    if sim_config.runs <= 0:
-        raise ValueError("runs must be positive")
-    if sim_config.target_blocks_long <= 0:
-        raise ValueError("target_blocks_long must be positive")
-    if sim_config.betray_on_nth_opportunity <= 0:
-        raise ValueError("betray_on_nth_opportunity must be positive")
-    if sim_config.betray_start_height < 0:
-        raise ValueError("betray_start_height must be >= 0")
-    if not (0.0 <= sim_config.q <= 1.0):
-        raise ValueError("q must be in [0, 1]")
-    if sim_config.betray_threshold <= 0:
-        raise ValueError("betray_threshold must be positive")
-
-    three_pools = parse_pool_spec(three_pools_spec)
-    total = sum(pool.hashrate for pool in three_pools)
-    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
-        raise ValueError(f"three hashrates must sum to 1.0, got {total}")
-    for pool in three_pools:
-        if pool.hashrate < 0.0:
-            raise ValueError(
-                f"three has negative hashrate: {pool.pool_id}={pool.hashrate}"
-            )
-
-    pool_ids = {pool.pool_id for pool in three_pools}
-    if {"b", "s", "h"} - pool_ids:
-        raise ValueError("three_pools must contain ids: b,s,h")
-    if traitor not in pool_ids:
-        raise ValueError(f"three_traitor {traitor} not in pools")
-    if traitor not in {"b", "s"}:
-        raise ValueError("three_traitor must be one of b,s")
-
-
 def main() -> None:
     args = build_arg_parser().parse_args()
 
-    run_option_a_unit_tests()
     validate_jobs(args.jobs)
 
     if args.progress_step_percent != 1:
@@ -109,11 +70,12 @@ def main() -> None:
         q=args.q,
         betray_threshold=args.betray_threshold,
     )
-    validate_three_only(sim_config, args.three_pools, args.three_traitor)
+    validate_inputs(sim_config, three_pools, args.three_traitor)
 
     scenarios = build_scenarios(
         sim_config=sim_config,
         experiment="three",
+        pools=three_pools,
         initial_members=("b", "s"),
         traitor_id=args.three_traitor,
     )

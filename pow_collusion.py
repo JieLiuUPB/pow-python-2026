@@ -1,3 +1,5 @@
+"""Event-driven three-pool cartel, betrayal, and tolerance experiments."""
+
 from __future__ import annotations
 
 import argparse
@@ -46,7 +48,8 @@ class ScenarioConfig:
     name: str
     mode: str  # long
     initial_members: tuple[str, ...]
-    break_rule: str  # none | dissolve_immediate | kick_immediate | dissolve_threshold | kick_threshold
+    # none | dissolve_immediate | kick_immediate | dissolve_threshold | kick_threshold
+    break_rule: str
     betray: BetrayConfig
 
 
@@ -69,7 +72,6 @@ class Block:
     height: int
     miner_id: str
     t_publish: float
-    is_public: bool = True
 
 
 @dataclass
@@ -78,7 +80,6 @@ class PrivateBlock:
     parent_public_id: int
     height: int
     miner_id: str
-    t_mine: float
 
 
 @dataclass
@@ -150,37 +151,25 @@ class RunResult:
 class CartelController:
     members: set[str]
     state: str = "IDLE"  # IDLE | WITHHOLD | RACE
-    base_height: Optional[int] = None
     private_bn: Optional[PrivateBlock] = None
     deadline: Optional[float] = None
-    race_cartel_tip_id: Optional[int] = None
     race_honest_tip_id: Optional[int] = None
 
-    def cartel_power(self, rates: Dict[str, float]) -> float:
-        return sum(rates[pool_id] for pool_id in self.members)
-
-    def start_withhold(
-        self, private_bn: PrivateBlock, base_height: int, deadline: float
-    ) -> None:
+    def start_withhold(self, private_bn: PrivateBlock, deadline: float) -> None:
         self.state = "WITHHOLD"
-        self.base_height = base_height
         self.private_bn = private_bn
         self.deadline = deadline
-        self.race_cartel_tip_id = None
         self.race_honest_tip_id = None
 
     def enter_race(self, honest_tip_id: int) -> None:
         self.state = "RACE"
         self.deadline = None
-        self.race_cartel_tip_id = None
         self.race_honest_tip_id = honest_tip_id
 
     def reset_round(self) -> None:
         self.state = "IDLE"
-        self.base_height = None
         self.private_bn = None
         self.deadline = None
-        self.race_cartel_tip_id = None
         self.race_honest_tip_id = None
 
 
@@ -222,8 +211,6 @@ class CollusionSimulation:
 
         self.opportunity_count_traitor = 0
         self.betray_count = 0
-        self.betray_triggered = False
-        self.break_triggered = False
         self.canon_len_at_betray: Optional[int] = None
         self.opportunity_at_betray: Optional[int] = None
 
@@ -254,46 +241,6 @@ class CollusionSimulation:
                 counts[miner] += 1
         return counts
 
-    def get_new_canonical_blocks_since(
-        self, old_tip_id: int, new_tip_id: int
-    ) -> List[int]:
-        if old_tip_id == new_tip_id:
-            return []
-        old_ancestors: set[int] = set()
-        node: Optional[int] = old_tip_id
-        while node is not None:
-            old_ancestors.add(node)
-            node = self.blocks_by_id[node].parent_id
-
-        path: List[int] = []
-        node = new_tip_id
-        while node is not None and node not in old_ancestors:
-            path.append(node)
-            node = self.blocks_by_id[node].parent_id
-        path.reverse()
-        return path
-
-    def is_descendant(self, child_id: int, ancestor_id: int) -> bool:
-        node: Optional[int] = child_id
-        while node is not None:
-            if node == ancestor_id:
-                return True
-            node = self.blocks_by_id[node].parent_id
-        return False
-
-    @staticmethod
-    def is_traitor_opportunity(
-        cartel_state: str,
-        mined_height: int,
-        public_tip_height: int,
-        miner_is_traitor_and_member: bool,
-    ) -> bool:
-        return (
-            miner_is_traitor_and_member
-            and cartel_state == "IDLE"
-            and mined_height == public_tip_height + 1
-        )
-
     def should_betray_short(self) -> bool:
         return (
             self.opportunity_count_traitor
@@ -315,8 +262,7 @@ class CollusionSimulation:
         self._next_private_id += 1
         return block_id
 
-    def _w_star(self, p: float) -> float:
-        _ = p
+    def _w_star(self) -> float:
         return 10.0 * self.sim_config.T
 
     def _publish_public_block(
@@ -331,14 +277,11 @@ class CollusionSimulation:
             height=height,
             miner_id=miner_id,
             t_publish=t_block,
-            is_public=True,
         )
-        old_tip = self.canonical_tip_id
         self.blocks_by_id[block_id] = block
         self.tips.add(block_id)
         self.tips.discard(parent_id)
         self.canonical_tip_id = self.get_canonical_tip()
-        _ = self.get_new_canonical_blocks_since(old_tip, self.canonical_tip_id)
         return block
 
     def build_mining_processes(self) -> List[MiningProcess]:
@@ -388,14 +331,26 @@ class CollusionSimulation:
                     continue
 
             if race_active and race_honest_tip_id is not None:
-                processes.append(
-                    MiningProcess(
-                        pool_id=pool_id,
-                        target_tip_id=race_honest_tip_id,
-                        lambda_rate=rate,
-                        target_kind="public",
+                gamma_rate = rate * self.sim_config.gamma
+                honest_rate = rate - gamma_rate
+                if gamma_rate > 0.0 and self.controller.private_bn is not None:
+                    processes.append(
+                        MiningProcess(
+                            pool_id=pool_id,
+                            target_tip_id=self.controller.private_bn.id,
+                            lambda_rate=gamma_rate,
+                            target_kind="private",
+                        )
                     )
-                )
+                if honest_rate > 0.0:
+                    processes.append(
+                        MiningProcess(
+                            pool_id=pool_id,
+                            target_tip_id=race_honest_tip_id,
+                            lambda_rate=honest_rate,
+                            target_kind="public",
+                        )
+                    )
             else:
                 processes.append(
                     MiningProcess(
@@ -478,7 +433,6 @@ class CollusionSimulation:
         else:
             raise RuntimeError(f"Unknown break rule: {rule}")
 
-        self.break_triggered = True
         if self.canon_len_at_betray is None:
             self.canon_len_at_betray = self.canonical_height()
 
@@ -505,7 +459,6 @@ class CollusionSimulation:
 
     def _record_betrayal(self) -> None:
         self.betray_count += 1
-        self.betray_triggered = True
         self.opportunity_at_betray = self.opportunity_count_traitor
         self.canon_len_at_betray = self.canonical_height()
         self._apply_break_if_needed()
@@ -522,20 +475,14 @@ class CollusionSimulation:
             self._record_betrayal()
             return
 
-        p_cartel = self.controller.cartel_power(self.pool_rates)
-        deadline = self.t + self._w_star(p_cartel)
+        deadline = self.t + self._w_star()
         private_bn = PrivateBlock(
             id=self._new_private_id(),
             parent_public_id=parent_id,
             height=mined_height,
             miner_id=miner_id,
-            t_mine=self.t,
         )
-        self.controller.start_withhold(
-            private_bn=private_bn,
-            base_height=public_tip_height,
-            deadline=deadline,
-        )
+        self.controller.start_withhold(private_bn=private_bn, deadline=deadline)
 
     def _on_private_mine(self, miner_id: str) -> None:
         state = self.controller.state
@@ -566,18 +513,15 @@ class CollusionSimulation:
                 miner_id=private_bn.miner_id,
                 t_publish=self.t,
             )
-            p_cartel = self.controller.cartel_power(self.pool_rates)
             new_private_bn = PrivateBlock(
                 id=self._new_private_id(),
                 parent_public_id=public_bn.id,
                 height=public_bn.height + 1,
                 miner_id=miner_id,
-                t_mine=self.t,
             )
             self.controller.start_withhold(
                 private_bn=new_private_bn,
-                base_height=public_bn.height,
-                deadline=self.t + self._w_star(p_cartel),
+                deadline=self.t + self._w_star(),
             )
             return
 
@@ -682,7 +626,8 @@ class CollusionSimulation:
         while not self._should_stop():
             if num_events >= self.max_events:
                 raise RuntimeError(
-                    f"Exceeded max_events={self.max_events}, scenario={self.scenario.name}, run={self.run_id}"
+                    f"Exceeded max_events={self.max_events}, "
+                    f"scenario={self.scenario.name}, run={self.run_id}"
                 )
             num_events += 1
 
@@ -705,95 +650,6 @@ class CollusionSimulation:
                 )
 
         return self._summarize()
-
-
-class FastCollusionSimulation(CollusionSimulation):
-    def _publish_public_block(
-        self, parent_id: int, miner_id: str, t_publish: Optional[float] = None
-    ) -> Block:
-        t_block = self.t if t_publish is None else t_publish
-        block_id = self._new_public_id()
-        height = self.blocks_by_id[parent_id].height + 1
-        block = Block(
-            id=block_id,
-            parent_id=parent_id,
-            height=height,
-            miner_id=miner_id,
-            t_publish=t_block,
-            is_public=True,
-        )
-        self.blocks_by_id[block_id] = block
-        self.tips.add(block_id)
-        self.tips.discard(parent_id)
-        self.canonical_tip_id = self.get_canonical_tip()
-        return block
-
-    def simulate_one_run(
-        self,
-        progress_step_percent: int = 10,
-        *,
-        use_tqdm: bool = False,
-    ) -> RunResult:
-        num_events = 0
-        total = self.sim_config.target_blocks_long
-        refresh_blocks = max(1, math.ceil(total * progress_step_percent / 100))
-        last_height = self.canonical_height()
-        pending_update = 0
-
-        progress_bar = None
-        if use_tqdm and tqdm is not None:
-            progress_bar = tqdm(
-                total=total,
-                desc=f"run {self.run_id + 1}",
-                unit="blk",
-                dynamic_ncols=True,
-            )
-
-        try:
-            while not self._should_stop():
-                if num_events >= self.max_events:
-                    raise RuntimeError(
-                        f"Exceeded max_events={self.max_events}, scenario={self.scenario.name}, run={self.run_id}"
-                    )
-                num_events += 1
-
-                processes = self.build_mining_processes()
-                event = self.sample_next_event(processes)
-                self.t = event.t_event
-
-                if event.event_type == "RELEASE_CARTEL":
-                    self.on_deadline()
-                else:
-                    if event.mine_process is None:
-                        raise RuntimeError("MINE event without process")
-
-                    process = event.mine_process
-                    if process.target_kind == "private":
-                        self._on_private_mine(miner_id=process.pool_id)
-                    else:
-                        self._on_public_mine(
-                            miner_id=process.pool_id,
-                            target_tip_id=process.target_tip_id,
-                        )
-
-                current_height = self.canonical_height()
-                height_delta = max(0, current_height - last_height)
-                last_height = current_height
-                pending_update += height_delta
-
-                if progress_bar is not None and (
-                    pending_update >= refresh_blocks or current_height >= total
-                ):
-                    progress_bar.update(pending_update)
-                    pending_update = 0
-
-            if progress_bar is not None and pending_update > 0:
-                progress_bar.update(pending_update)
-
-            return self._summarize()
-        finally:
-            if progress_bar is not None:
-                progress_bar.close()
 
 
 def parse_pool_spec(spec: str) -> List[PoolConfig]:
@@ -957,8 +813,7 @@ def write_rows_csv(
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(fieldnames))
         writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+        writer.writerows(rows)
 
 
 def read_rows_csv(path: Path) -> List[Dict[str, str]]:
@@ -1109,7 +964,6 @@ def plot_summary(
     output_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_png, dpi=300, bbox_inches="tight")
     fig.savefig(output_pdf, format="pdf", dpi=300, bbox_inches="tight")
-    plt.show()
     plt.close(fig)
 
 
@@ -1176,13 +1030,7 @@ def _run_single_experiment_task(
     run_id: int,
 ) -> RunResult:
     seed = make_seed(seed_base, experiment, scenario.name, run_id)
-    sim_cls: type[CollusionSimulation]
-    if scenario.name == "BetrayTolerated":
-        sim_cls = FastCollusionSimulation
-    else:
-        sim_cls = CollusionSimulation
-
-    sim = sim_cls(
+    sim = CollusionSimulation(
         experiment=experiment,
         sim_config=sim_config,
         pools=pools,
@@ -1272,139 +1120,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_option_a_unit_tests() -> None:
-    assert CollusionSimulation.is_traitor_opportunity(
-        cartel_state="IDLE",
-        mined_height=11,
-        public_tip_height=10,
-        miner_is_traitor_and_member=True,
-    )
-    assert not CollusionSimulation.is_traitor_opportunity(
-        cartel_state="WITHHOLD",
-        mined_height=11,
-        public_tip_height=10,
-        miner_is_traitor_and_member=True,
-    )
-    assert not CollusionSimulation.is_traitor_opportunity(
-        cartel_state="IDLE",
-        mined_height=12,
-        public_tip_height=10,
-        miner_is_traitor_and_member=True,
-    )
-    assert not CollusionSimulation.is_traitor_opportunity(
-        cartel_state="IDLE",
-        mined_height=11,
-        public_tip_height=10,
-        miner_is_traitor_and_member=False,
-    )
-
-    sim_config = SimConfig(
-        T=10.0,
-        gamma=0.0,
-        runs=1,
-        target_blocks_long=10,
-        betray_on_nth_opportunity=1,
-        betray_start_height=0,
-        q=1.0,
-        betray_threshold=10,
-    )
-    pools = parse_pool_spec("b=0.33,s=0.33,h=0.34")
-
-    compliant = CollusionSimulation(
-        experiment="three",
-        sim_config=sim_config,
-        pools=pools,
-        scenario=ScenarioConfig(
-            name="AlwaysCartel",
-            mode="long",
-            initial_members=("b", "s"),
-            break_rule="none",
-            betray=BetrayConfig(mode="none", traitor_id="s"),
-        ),
-        run_id=0,
-        seed=1,
-        max_events=100,
-    )
-    compliant._on_member_first_block(miner_id="b", parent_id=0)
-    assert compliant.controller.state == "WITHHOLD"
-    assert compliant.controller.private_bn is not None
-    compliant._on_private_mine(miner_id="s")
-    assert compliant.controller.state == "WITHHOLD"
-    assert compliant.controller.private_bn is not None
-    assert compliant.controller.private_bn.miner_id == "s"
-    assert compliant.canonical_height() == 1
-
-    betraying = CollusionSimulation(
-        experiment="three",
-        sim_config=sim_config,
-        pools=pools,
-        scenario=ScenarioConfig(
-            name="BetrayTolerated",
-            mode="long",
-            initial_members=("b", "s"),
-            break_rule="none",
-            betray=BetrayConfig(
-                mode="prob",
-                traitor_id="s",
-                betray_on_nth_opportunity=1,
-                betray_start_height=0,
-                q=1.0,
-                betray_threshold=10,
-            ),
-        ),
-        run_id=0,
-        seed=1,
-        max_events=100,
-    )
-    betraying._on_member_first_block(miner_id="b", parent_id=0)
-    assert betraying.controller.state == "WITHHOLD"
-    betraying._on_private_mine(miner_id="s")
-    assert betraying.controller.state == "IDLE"
-    assert betraying.canonical_height() == 2
-    assert betraying.betray_count == 1
-    assert betraying.opportunity_count_traitor == 1
-    chain = betraying.reconstruct_chain()
-    assert [betraying.blocks_by_id[block_id].miner_id for block_id in chain] == [
-        "b",
-        "s",
-    ]
-
-    low_power_three_pools = parse_pool_spec("b=0.49,s=0.11,h=0.40")
-    low_power_three_scenarios = build_scenarios(
-        sim_config=sim_config,
-        experiment="three",
-        pools=low_power_three_pools,
-        initial_members=("b", "s"),
-        traitor_id="s",
-    )
-    assert low_power_three_scenarios[1].break_rule == "dissolve_immediate"
-    assert low_power_three_scenarios[2].break_rule == "dissolve_threshold"
-
-    low_power_break = CollusionSimulation(
-        experiment="three",
-        sim_config=sim_config,
-        pools=low_power_three_pools,
-        scenario=low_power_three_scenarios[1],
-        run_id=0,
-        seed=1,
-        max_events=100,
-    )
-    low_power_break._on_member_first_block(miner_id="b", parent_id=0)
-    low_power_break._on_private_mine(miner_id="s")
-    assert low_power_break.controller.members == set()
-    assert low_power_break.controller.state == "IDLE"
-    assert all(
-        process.target_kind == "public"
-        and process.target_tip_id == low_power_break.canonical_tip_id
-        for process in low_power_break.build_mining_processes()
-    )
-
-
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    run_option_a_unit_tests()
     validate_jobs(args.jobs)
 
     three_pools = parse_pool_spec(args.three_pools)

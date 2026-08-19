@@ -1,3 +1,5 @@
+"""Plot OCW and selfish-mining orphan-rate summaries together."""
+
 from __future__ import annotations
 
 import argparse
@@ -6,7 +8,7 @@ import itertools
 import math
 import os
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Callable, Dict, List, Sequence
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/codex-matplotlib-cache")
 
@@ -35,8 +37,7 @@ def write_csv_rows(path: Path, rows: Sequence[Dict[str, float]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(row_list[0].keys()))
         writer.writeheader()
-        for row in row_list:
-            writer.writerow(row)
+        writer.writerows(row_list)
 
 
 def theoretical_tbw_orphan_rate(p: float) -> float:
@@ -143,7 +144,7 @@ def build_plot_rows(
 def build_dense_curve(
     p_min: float,
     p_max: float,
-    theory_fn,
+    theory_fn: Callable[[float], float],
     num_points: int = 400,
 ) -> tuple[np.ndarray, np.ndarray]:
     p_grid = np.linspace(p_min, p_max, num_points, dtype=float)
@@ -165,6 +166,11 @@ def plot_comparison(
     output_path: Path,
     include_selfish_theory: bool,
 ) -> None:
+    if not tbw_rows:
+        raise ValueError("TBW summary is empty")
+    if not selfish_rows:
+        raise ValueError("selfish-mining summary is empty")
+
     try:
         plt.style.use(["science", "ieee", "no-latex"])
     except Exception:
@@ -250,7 +256,6 @@ def plot_comparison(
     ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     save_figure_bundle(output_path, fig)
-    plt.show()
     plt.close(fig)
 
 
@@ -261,7 +266,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--simulation-summary",
         default=str(DEFAULT_TBW_SUMMARY),
-        help="chain-withhold summary CSV; default falls back to results/chain_withhold/summary.csv",
+        help=(
+            "chain-withhold summary CSV; default falls back to "
+            "results/chain_withhold/summary.csv"
+        ),
     )
     parser.add_argument(
         "--selfish-summary",
@@ -307,6 +315,7 @@ def main() -> None:
     requested_simulation_summary = Path(args.simulation_summary)
     simulation_summary = resolve_tbw_summary_path(args.simulation_summary)
     selfish_summary = Path(args.selfish_summary)
+    output_path = normalize_output_path(args.output)
 
     if not simulation_summary.exists():
         raise FileNotFoundError(f"Missing simulation summary: {simulation_summary}")
@@ -323,12 +332,12 @@ def main() -> None:
     plot_comparison(
         tbw_rows=tbw_rows,
         selfish_rows=selfish_rows,
-        output_path=normalize_output_path(args.output),
+        output_path=output_path,
         include_selfish_theory=not args.skip_selfish_theory,
     )
     write_csv_rows(Path(args.plot_data), plot_rows)
 
-    print(f"saved figure to {normalize_output_path(args.output).with_suffix('.png')}")
+    print(f"saved figure to {output_path.with_suffix('.png')}")
     print(f"saved plot data to {args.plot_data}")
 
 

@@ -7,6 +7,9 @@ Key difference from pow_simulation.py scenario 1:
   a fresh w* withhold window for B_{n+1}.  This lets A chain multiple
   withhold cycles back-to-back.
 
+The default experiment compares w = 0.5T, 1T, and 10T over attacker
+hashrates from 0.30 through 0.95.
+
 Statistics collected (no DAA, terminated at 2016 canonical blocks):
   - A_share  = A_blocks_canonical / canonical_len
   - orphan_rate = orphan_published / total_published
@@ -57,8 +60,6 @@ def get_plt():
     return plt
 
 
-EPS = 1e-12
-
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -79,13 +80,11 @@ class PrivateBlock:
     parent_id: int
     height: int
     miner: str
-    t_mine: float
 
 
 @dataclass
 class AttackerState:
     state: str = "IDLE"  # IDLE | WITHHOLD | RACE
-    base_height: Optional[int] = None
     private_bn: Optional[PrivateBlock] = None
     deadline: Optional[float] = None
     race_tip_id: Optional[int] = None
@@ -103,6 +102,8 @@ class AttackCounters:
 @dataclass
 class RunResult:
     p: float
+    w_over_T: float
+    w: float
     run_id: int
     seed: int
     T: float
@@ -124,6 +125,8 @@ class RunResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "p": self.p,
+            "w_over_T": self.w_over_T,
+            "w": self.w,
             "run_id": self.run_id,
             "seed": self.seed,
             "T": self.T,
@@ -164,6 +167,7 @@ class ChainWithholdSimulation:
         target_blocks: int,
         run_id: int,
         max_events: Optional[int] = None,
+        w_over_T: float = 10.0,
     ) -> None:
         self.T = float(T)
         self.p = float(p)
@@ -171,6 +175,17 @@ class ChainWithholdSimulation:
         self.target_blocks = target_blocks
         self.run_id = run_id
         self.max_events = max_events
+        self.w_over_T = float(w_over_T)
+        if self.T <= 0.0:
+            raise ValueError("T must be positive")
+        if not (0.0 < self.p < 1.0):
+            raise ValueError("p must be in (0, 1)")
+        if self.target_blocks <= 0:
+            raise ValueError("target_blocks must be positive")
+        if self.w_over_T < 0.0:
+            raise ValueError("w_over_T must be non-negative")
+        if self.max_events is not None and self.max_events <= 0:
+            raise ValueError("max_events must be positive when provided")
         self.rng = np.random.default_rng(self.seed)
 
         self.t = 0.0
@@ -196,8 +211,8 @@ class ChainWithholdSimulation:
         return bid
 
     def _w_star(self) -> float:
-        """Fixed w* = 10T (same as pow_simulation.py)."""
-        return 10.0 * self.T
+        """Return the configured withholding window w."""
+        return self.w_over_T * self.T
 
     def _get_chain_tip_id(self) -> int:
         def key(bid: int) -> tuple[int, float, int]:
@@ -240,14 +255,6 @@ class ChainWithholdSimulation:
         )
         return bid
 
-    def _is_descendant(self, child_id: int, ancestor_id: int) -> bool:
-        cur: Optional[int] = child_id
-        while cur is not None:
-            if cur == ancestor_id:
-                return True
-            cur = self.blocks_by_id[cur].parent_id
-        return False
-
     def _reset_attacker(self) -> None:
         self.attacker = AttackerState()
 
@@ -266,10 +273,8 @@ class ChainWithholdSimulation:
                 parent_id=self.canonical_tip_id,
                 height=parent.height + 1,
                 miner="A",
-                t_mine=self.t,
             )
             self.attacker.state = "WITHHOLD"
-            self.attacker.base_height = parent.height
             self.attacker.private_bn = private_bn
             self.attacker.deadline = self.t + self._w_star()
             self.attacker.race_tip_id = None
@@ -301,9 +306,7 @@ class ChainWithholdSimulation:
                 parent_id=bn.id,
                 height=bn.height + 1,
                 miner="A",
-                t_mine=self.t,
             )
-            self.attacker.base_height = bn.height  # updated base
             self.attacker.private_bn = bn1
             self.attacker.deadline = self.t + self._w_star()
             # Stay in WITHHOLD – no state change.
@@ -430,6 +433,8 @@ class ChainWithholdSimulation:
 
         return RunResult(
             p=self.p,
+            w_over_T=self._w_star() / self.T,
+            w=self._w_star(),
             run_id=self.run_id,
             seed=self.seed,
             T=self.T,
@@ -487,8 +492,13 @@ class ChainWithholdSimulation:
 # ---------------------------------------------------------------------------
 
 
-def _derive_seed(base_seed: int, p: float, run_id: int) -> int:
-    token = f"{base_seed}|chain_withhold|{p:.8f}|{run_id}"
+def _derive_seed(
+    base_seed: int,
+    p: float,
+    run_id: int,
+    w_over_T: float = 10.0,
+) -> int:
+    token = f"{base_seed}|chain_withhold|{p:.8f}|{w_over_T:.8f}|{run_id}"
     digest = hashlib.sha256(token.encode()).digest()
     return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
 
@@ -500,6 +510,7 @@ def _run_task(
     target_blocks: int,
     run_id: int,
     max_events: Optional[int],
+    w_over_T: float = 10.0,
 ) -> Dict[str, Any]:
     sim = ChainWithholdSimulation(
         T=T,
@@ -508,6 +519,7 @@ def _run_task(
         target_blocks=target_blocks,
         run_id=run_id,
         max_events=max_events,
+        w_over_T=w_over_T,
     )
     return sim.run().to_dict()
 
@@ -515,6 +527,7 @@ def _run_task(
 def run_experiments(
     p_list: Sequence[float],
     *,
+    w_over_T_list: Sequence[float] = (0.5, 1.0, 10.0),
     T: float = 10.0,
     n_repeats: int = 10,
     target_blocks: int = 2016,
@@ -523,8 +536,34 @@ def run_experiments(
     max_events: Optional[int] = None,
     show_progress: bool = True,
 ) -> List[Dict[str, Any]]:
+    if T <= 0.0:
+        raise ValueError("T must be positive")
+    if n_repeats <= 0:
+        raise ValueError("n_repeats must be positive")
+    if target_blocks <= 0:
+        raise ValueError("target_blocks must be positive")
+    if jobs <= 0:
+        raise ValueError("jobs must be positive")
+    if not p_list:
+        raise ValueError("p_list must not be empty")
+    if not w_over_T_list:
+        raise ValueError("w_over_T_list must not be empty")
+    if any(not 0.0 < p < 1.0 for p in p_list):
+        raise ValueError("all p values must be in (0, 1)")
+    if any(w_over_T < 0.0 for w_over_T in w_over_T_list):
+        raise ValueError("all w/T values must be non-negative")
+
     tasks = [
-        (T, p, _derive_seed(base_seed, p, run_id), target_blocks, run_id, max_events)
+        (
+            T,
+            p,
+            _derive_seed(base_seed, p, run_id, w_over_T),
+            target_blocks,
+            run_id,
+            max_events,
+            w_over_T,
+        )
+        for w_over_T in w_over_T_list
         for p in p_list
         for run_id in range(n_repeats)
     ]
@@ -565,7 +604,13 @@ def run_experiments(
             )
             raw = _collect_with_executor(concurrent.futures.ThreadPoolExecutor)
 
-    raw.sort(key=lambda r: (float(r["p"]), int(r["run_id"])))
+    raw.sort(
+        key=lambda r: (
+            float(r["w_over_T"]),
+            float(r["p"]),
+            int(r["run_id"]),
+        )
+    )
     return raw
 
 
@@ -575,13 +620,14 @@ def run_experiments(
 
 
 def summarize(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    grouped: Dict[float, List[Dict[str, Any]]] = {}
+    grouped: Dict[tuple[float, float], List[Dict[str, Any]]] = {}
     for row in raw:
-        grouped.setdefault(float(row["p"]), []).append(row)
+        key = (float(row.get("w_over_T", 10.0)), float(row["p"]))
+        grouped.setdefault(key, []).append(row)
 
     summary = []
-    for p in sorted(grouped):
-        rows = grouped[p]
+    for w_over_T, p in sorted(grouped):
+        rows = grouped[(w_over_T, p)]
         shares = [float(r["A_share"]) for r in rows]
         orphans = [float(r["orphan_rate"]) for r in rows]
         ext = [float(r["attacks_chain_extensions"]) for r in rows]
@@ -589,6 +635,8 @@ def summarize(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         summary.append(
             {
                 "p": p,
+                "w_over_T": w_over_T,
+                "w": w_over_T * float(rows[0]["T"]),
                 "runs": n,
                 "A_share_mean": mean(shares),
                 "A_share_std": stdev(shares) if n > 1 else 0.0,
@@ -609,8 +657,7 @@ def write_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(row_list[0].keys()))
         writer.writeheader()
-        for row in row_list:
-            writer.writerow(row)
+        writer.writerows(row_list)
 
 
 # ---------------------------------------------------------------------------
@@ -649,66 +696,111 @@ def plot_results(
     plt_mod.rcParams["text.usetex"] = False
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    p_vals = np.array([row["p"] for row in summary], dtype=float)
-    share_mean = np.array([row["A_share_mean"] for row in summary], dtype=float)
-    share_std = np.array([row["A_share_std"] for row in summary], dtype=float)
-    orp_mean = np.array([row["orphan_rate_mean"] for row in summary], dtype=float)
-    orp_std = np.array([row["orphan_rate_std"] for row in summary], dtype=float)
+    if not summary:
+        print("[warn] empty summary, skip plotting")
+        return
 
-    p_dense = np.linspace(float(p_vals.min()), float(p_vals.max()), 400)
-    theory_share = np.array([_tbw_a_share(float(p)) for p in p_dense])
-    theory_orp = np.array([_tbw_orphan_rate(float(p)) for p in p_dense])
+    rows_by_window: Dict[float, List[Dict[str, Any]]] = {}
+    for row in summary:
+        rows_by_window.setdefault(float(row.get("w_over_T", 10.0)), []).append(row)
+    for rows in rows_by_window.values():
+        rows.sort(key=lambda row: float(row["p"]))
 
-    marker = itertools.cycle(("+", "x", "s", "v", "o", "D", "^"))
+    all_p = np.array([row["p"] for row in summary], dtype=float)
+    theory_start = max(0.5, float(all_p.min()))
+    if float(all_p.max()) >= theory_start:
+        p_theory = np.linspace(theory_start, float(all_p.max()), 400)
+    else:
+        p_theory = np.array([], dtype=float)
+    theory_share = np.array([_tbw_a_share(float(p)) for p in p_theory])
+    theory_orp = np.array([_tbw_orphan_rate(float(p)) for p in p_theory])
+
+    # Keep the three simulated windows in one blue family: shorter windows are
+    # darker and longer windows are lighter.  The lightest blue still has
+    # enough contrast against the white background and grey grid.
+    sim_colors = itertools.cycle(("#08306B", "#4292C6", "#9ECAE1"))
+    sim_markers = itertools.cycle(("o", "s", "^"))
+    window_styles = {
+        w_over_T: (next(sim_colors), next(sim_markers))
+        for w_over_T in sorted(rows_by_window)
+    }
+    theory_color = "#B42318"
+    baseline_color = "#000000"
 
     # ---- Figure 1: A_share ----
     fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
-    ax.errorbar(
-        p_vals,
-        share_mean,
-        yerr=share_std,
-        marker=next(marker),
-        markersize=3,
-        markerfacecolor="none",
-        capsize=4,
-        linewidth=1.5,
-        label="OCW sim",
-    )
+    for zorder, w_over_T in enumerate(sorted(rows_by_window), start=3):
+        rows = rows_by_window[w_over_T]
+        color, marker = window_styles[w_over_T]
+        ax.errorbar(
+            [row["p"] for row in rows],
+            [row["A_share_mean"] for row in rows],
+            yerr=[row["A_share_std"] for row in rows],
+            color=color,
+            marker=marker,
+            markersize=3.5,
+            markerfacecolor="none",
+            capsize=3,
+            linestyle="-",
+            linewidth=1.5,
+            label=rf"OCW sim, $w={w_over_T:g}T$",
+            zorder=zorder,
+        )
     ax.plot(
-        p_vals,
-        p_vals,
+        [float(all_p.min()), float(all_p.max())],
+        [float(all_p.min()), float(all_p.max())],
+        color=baseline_color,
         linestyle="--",
         linewidth=1.5,
-        marker=next(marker),
-        markersize=3,
-        markerfacecolor="none",
-        label=r"baseline $y=\alpha$",
+        label=r"Honest Mining ($y=\alpha$)",
+        zorder=2,
     )
-    ax.plot(p_dense, theory_share, linestyle=":", linewidth=1.5, label="OCW theory")
+    ax.plot(
+        p_theory,
+        theory_share,
+        color=theory_color,
+        linestyle="--",
+        linewidth=2.0,
+        label="OCW theory",
+        zorder=20,
+    )
     ax.set_xlabel(r"Attacker hashrate $\alpha$", fontsize=12)
-    ax.set_ylabel("$A_{\\mathrm{share}}$", fontsize=12)
+    ax.set_ylabel("Attacker Block Share", fontsize=12)
     ax.tick_params(labelsize=10)
     ax.legend(fontsize=10)
     ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     fig.savefig(figures_dir / "cw_a_share.pdf", format="pdf", dpi=300)
-    plt_mod.show()
     plt_mod.close(fig)
 
     # ---- Figure 2: orphan rate ----
     fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
-    ax.errorbar(
-        p_vals,
-        orp_mean,
-        yerr=orp_std,
-        marker=next(marker),
-        markersize=3,
-        markerfacecolor="none",
-        capsize=4,
-        linewidth=1.5,
-        label="OCW sim",
+    for zorder, w_over_T in enumerate(sorted(rows_by_window), start=3):
+        rows = rows_by_window[w_over_T]
+        color, marker = window_styles[w_over_T]
+        ax.errorbar(
+            [row["p"] for row in rows],
+            [row["orphan_rate_mean"] for row in rows],
+            yerr=[row["orphan_rate_std"] for row in rows],
+            color=color,
+            marker=marker,
+            markersize=3.5,
+            markerfacecolor="none",
+            capsize=3,
+            linestyle="-",
+            linewidth=1.5,
+            label=rf"OCW sim, $w={w_over_T:g}T$",
+            zorder=zorder,
+        )
+    ax.plot(
+        p_theory,
+        theory_orp,
+        color=theory_color,
+        linestyle="--",
+        linewidth=2.0,
+        label="OCW theory",
+        zorder=20,
     )
-    ax.plot(p_dense, theory_orp, linestyle=":", linewidth=1.5, label="OCW theory")
     ax.set_xlabel(r"Attacker hashrate $\alpha$", fontsize=12)
     ax.set_ylabel("Orphan rate", fontsize=12)
     ax.tick_params(labelsize=10)
@@ -716,7 +808,6 @@ def plot_results(
     ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     fig.savefig(figures_dir / "cw_orphan_rate.pdf", format="pdf", dpi=300)
-    plt_mod.show()
     plt_mod.close(fig)
 
 
@@ -726,7 +817,10 @@ def plot_results(
 
 
 def _parse_p_list(raw: str) -> List[float]:
-    return [float(x.strip()) for x in raw.split(",") if x.strip()]
+    values = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    if not values:
+        raise ValueError("list must not be empty")
+    return values
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -735,7 +829,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--p-list",
-        default="0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90,0.95",
+        default=(
+            "0.30,0.35,0.40,0.45,0.50,0.55,0.60,"
+            "0.65,0.70,0.75,0.80,0.85,0.90,0.95"
+        ),
+    )
+    parser.add_argument(
+        "--w-over-T-list",
+        default="0.5,1,10",
+        help="comma-separated withholding-window multipliers w/T",
     )
     parser.add_argument("--T", type=float, default=10.0)
     parser.add_argument("--repeats", type=int, default=100)
@@ -753,6 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     p_list = _parse_p_list(args.p_list)
+    w_over_T_list = _parse_p_list(args.w_over_T_list)
     results_dir = Path(args.results_dir)
     figures_dir = Path(args.figures_dir)
 
@@ -761,9 +864,11 @@ def main() -> None:
         f"target_blocks={args.target_blocks}, jobs={args.jobs}"
     )
     print(f"p_list = {p_list}")
+    print(f"w/T list = {w_over_T_list}")
 
     raw = run_experiments(
         p_list=p_list,
+        w_over_T_list=w_over_T_list,
         T=args.T,
         n_repeats=args.repeats,
         target_blocks=args.target_blocks,
@@ -780,12 +885,13 @@ def main() -> None:
 
     # Print summary table
     print(
-        f"\n{'p':>6}  {'A_share_mean':>13}  {'A_share_std':>12}  "
+        f"\n{'w/T':>6}  {'p':>6}  {'A_share_mean':>13}  {'A_share_std':>12}  "
         f"{'orp_mean':>10}  {'orp_std':>9}  {'chain_ext_mean':>14}"
     )
     for row in summary:
         print(
-            f"{row['p']:>6.2f}  {row['A_share_mean']:>13.6f}  "
+            f"{row['w_over_T']:>6.1f}  {row['p']:>6.2f}  "
+            f"{row['A_share_mean']:>13.6f}  "
             f"{row['A_share_std']:>12.6f}  {row['orphan_rate_mean']:>10.6f}  "
             f"{row['orphan_rate_std']:>9.6f}  {row['chain_extensions_mean']:>14.2f}"
         )

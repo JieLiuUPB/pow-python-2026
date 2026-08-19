@@ -98,6 +98,32 @@ class FixedTimeSummaryTests(unittest.TestCase):
         self.assertEqual(rows[0]["metric"], "A_blocks_canonical_fixedtime_n_round_over_pn2016")
         self.assertAlmostEqual(rows[0]["metric_mean"], expected_mean)
 
+    def test_build_fixed_time_ratio_uses_configured_epoch_length(self) -> None:
+        checkpoint = TimeCheckpointResult(
+            scenario="test",
+            p=0.5,
+            n=2,
+            run_id=0,
+            seed=1,
+            t_checkpoint=400.0,
+            A_blocks_canonical=100,
+            H_blocks_canonical=100,
+            canonical_len=200,
+            final_difficulty_so_far=1.0,
+            num_epochs_completed_so_far=2,
+        )
+
+        rows = build_fixed_time_ratio_summary_rows(
+            checkpoint_results=[checkpoint],
+            p_values=[0.5],
+            n_values=[2],
+            metric_name="custom_epoch_ratio",
+            runs=1,
+            epoch_len=100,
+        )
+
+        self.assertAlmostEqual(rows[0]["metric_mean"], 1.0)
+
 
 class TimeCheckpointCaptureTests(unittest.TestCase):
     def test_capture_pending_checkpoints_uses_state_before_future_event(self) -> None:
@@ -147,7 +173,14 @@ class DifficultyAdjustmentBasisTests(unittest.TestCase):
         )
         return sim
 
-    def _publish(self, sim: TBWSimulation, block_id: int, parent_id: int, height: int, t_publish: float) -> None:
+    def _publish(
+        self,
+        sim: TBWSimulation,
+        block_id: int,
+        parent_id: int,
+        height: int,
+        t_publish: float,
+    ) -> None:
         sim._publish_block(
             Block(
                 id=block_id,
@@ -184,6 +217,31 @@ class DifficultyAdjustmentBasisTests(unittest.TestCase):
 
 
 class SelfishDifficultyAdjustmentTests(unittest.TestCase):
+    def test_canonical_basis_waits_for_canonical_chain_epoch_len(self) -> None:
+        sim = SelfishMiningDAASimulation(
+            T=10.0,
+            p=0.55,
+            gamma=0.0,
+            seed=1,
+            mode="by_time",
+            t_end=100.0,
+            enable_daa=True,
+            epoch_len=3,
+            scenario="selfish-test",
+            run_id=0,
+            n_value=1,
+            daa_count_basis="canonical",
+        )
+
+        sim._publish_block(Block(id=1, parent_id=0, height=1, miner="A", t_publish=5.0))
+        sim._publish_block(Block(id=2, parent_id=1, height=2, miner="H", t_publish=10.0))
+        sim._publish_block(Block(id=3, parent_id=0, height=1, miner="A", t_publish=12.0))
+
+        sim._maybe_adjust_difficulty()
+
+        self.assertEqual(sim.epochs_completed, 0)
+        self.assertAlmostEqual(sim.difficulty, 1.0)
+
     def test_public_basis_adjusts_when_published_blocks_reach_epoch_len(self) -> None:
         sim = SelfishMiningDAASimulation(
             T=10.0,
