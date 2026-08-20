@@ -31,7 +31,7 @@ point, so parallel execution does not change results.
 | Program                          | Default parameter point                                                                                        |            Runs | Seed                                              | Horizon                                                            | Figure error bars                                     |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------: | ------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------- |
 | `pow_simulation.py`              | Scenario 3: `p=0.65,0.75`, canonical DAA, `n=1,2,3,5`; scenario 4: `p=0.65,0.75`, public/orphan-aware DAA, `n=1,3,10`; both OCW and SM | 10 per strategy and `p` | base `2026` + scenario + `p` + run ID + max round | Scenario 3 ends at `5*2016*T=100800`; scenario 4 ends at `10*2016*T=201600`; listed `n` values are checkpoints | sample standard deviation |
-| `pow_chain_withhold.py`          | `p=0.30..0.95` by `0.05`; `w/T=0.5,1,10`                                                                       |             100 | base `2026` + `p` + `w/T` + run ID                | stop when canonical length is at least 2016                        | sample standard deviation                             |
+| `pow_chain_withhold.py`          | Chain metrics: configured `p` and `w/T=0.5,1,10`; canonical DAA comparison: OCW (`w=10T`) vs SM at `p=0.55..0.95` |             100 | base `2026` + experiment + strategy + `p` + run ID | stop when canonical length is at least 2016; then adjust once       | sample standard deviation                             |
 | `ocw_w_sweep.py`                 | `alpha=0.65,0.75`; `w/T=0,0.25,0.5,1,2,5,10`                                                                   |              50 | base `2026` + `alpha` + `w/T` + run ID            | stop when canonical length is at least 2016                        | 95% CI: `1.96*s/sqrt(n)`                              |
 | `pow_selfish.py`                 | `p=0.55..0.95` by `0.05`; `gamma=0`                                                                            |              10 | base `2026` + `p` + `gamma` + run ID              | cross 2016 finalized blocks, then settle the pending state         | standard error: `s/sqrt(n)`                           |
 | `pow_collusion.py`               | four cartel/betrayal scenarios; pools `b=0.3,s=0.3,h=0.4`                                                      | 10 per scenario | base `20260224` + experiment + scenario + run ID  | reach 20160 canonical blocks; report the first 20160               | no error bars; CSV includes sample standard deviation |
@@ -82,7 +82,7 @@ epoch release described above, so `gamma` does not affect those default runs.
 | File                                        | Purpose                                                                                                        |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `pow_simulation.py`                         | Runs fixed-time OCW/SM comparisons with canonical or public/orphan-aware DAA and writes raw runs, checkpoints, epoch statistics, summaries, and figures. |
-| `pow_chain_withhold.py`                     | Runs the chained OCW strategy for several attacker shares and withholding windows.                             |
+| `pow_chain_withhold.py`                     | Runs the chained OCW strategy and a one-epoch canonical-DAA comparison of OCW (`w=10T`) with classic SM.       |
 | `ocw_w_sweep.py`                            | Sweeps `w/T`, compares simulation with theory, and plots 95% confidence intervals.                             |
 | `pow_selfish.py`                            | Runs the standalone classic Eyal--Sirer selfish-mining baseline without DAA.                                   |
 | `pow_collusion.py`                          | Simulates three-pool cartel cooperation, betrayal, breakup, and tolerance.                                     |
@@ -101,6 +101,7 @@ Pandas and tqdm are optional helpers.
 ```bash
 python3 pow_simulation.py --scenarios all
 python3 pow_chain_withhold.py
+python3 pow_chain_withhold.py --only-daa-comparison
 python3 ocw_w_sweep.py
 python3 pow_selfish.py
 python3 pow_collusion.py
@@ -126,7 +127,7 @@ Use `python3 <file>.py --help` to see overrides and output paths.
 
 ### `pow_chain_withhold.py`
 
-这个文件模拟连续链式隐藏策略。它扫描攻击者算力和 `w/T`。它输出主链份额、孤块率和图。
+这个文件模拟连续链式隐藏策略。它扫描攻击者算力和 `w/T`，输出主链份额、孤块率和图；同时包含一个 canonical-chain DAA 对比模块，在 `w=10T`、`p=0.55..0.95` 下统计 OCW 与经典 SM 完成一个主链周期后的新难度，并把两条仿真曲线与两条占位理论曲线画在同一张图中。可用 `--only-daa-comparison` 单独运行该模块。
 
 ### `ocw_w_sweep.py`
 

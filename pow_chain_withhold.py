@@ -8,11 +8,17 @@ Key difference from pow_simulation.py scenario 1:
   withhold cycles back-to-back.
 
 The default experiment compares w = 0.5T, 1T, and 10T over attacker
-hashrates from 0.30 through 0.95.
+hashrates from 0.30 through 0.95.  It also compares the one-epoch
+canonical-chain DAA result of OCW at w = 10T with classic selfish mining
+over p = 0.55 through 0.95.
 
 Statistics collected (no DAA, terminated at 2016 canonical blocks):
   - A_share  = A_blocks_canonical / canonical_len
   - orphan_rate = orphan_published / total_published
+
+The separate DAA comparison starts at D_old = 1, stops after one canonical
+epoch, and then applies exactly one adjustment:
+  D_new = D_old * (epoch_len * T) / epoch_elapsed_time
 """
 
 from __future__ import annotations
@@ -40,6 +46,10 @@ except ModuleNotFoundError:
 # ---------------------------------------------------------------------------
 plt = None
 _PLOT_IMPORT_TRIED = False
+EPS = 1e-12
+CANONICAL_DAA_P_VALUES = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+CANONICAL_DAA_W_OVER_T = 10.0
+SELFISH_GAMMA = 0.0
 
 
 def get_plt():
@@ -144,6 +154,46 @@ class RunResult:
             "attacks_success_race": self.attacks_success_race,
             "attacks_abort": self.attacks_abort,
             "attacks_release_only": self.attacks_release_only,
+        }
+
+
+@dataclass
+class CanonicalDAARunResult:
+    strategy: str
+    p: float
+    run_id: int
+    seed: int
+    T: float
+    epoch_len: int
+    canonical_len_at_stop: int
+    a_blocks_counted: int
+    h_blocks_counted: int
+    t_start: float
+    t_end: float
+    t_total: float
+    difficulty_old: float
+    difficulty_new: float
+    w_over_T: Optional[float] = None
+    gamma: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "p": self.p,
+            "w_over_T": "" if self.w_over_T is None else self.w_over_T,
+            "gamma": "" if self.gamma is None else self.gamma,
+            "run_id": self.run_id,
+            "seed": self.seed,
+            "T": self.T,
+            "epoch_len": self.epoch_len,
+            "canonical_len_at_stop": self.canonical_len_at_stop,
+            "a_blocks_counted": self.a_blocks_counted,
+            "h_blocks_counted": self.h_blocks_counted,
+            "t_start": self.t_start,
+            "t_end": self.t_end,
+            "t_total": self.t_total,
+            "difficulty_old": self.difficulty_old,
+            "difficulty_new": self.difficulty_new,
         }
 
 
@@ -488,6 +538,151 @@ class ChainWithholdSimulation:
 
 
 # ---------------------------------------------------------------------------
+# One-epoch canonical-chain DAA comparison
+# ---------------------------------------------------------------------------
+
+
+def calculate_canonical_daa(
+    *,
+    difficulty_old: float,
+    epoch_len: int,
+    T: float,
+    elapsed_time: float,
+) -> float:
+    """Apply the canonical-chain DAA formula used in pow_simulation.py."""
+    if difficulty_old <= 0.0:
+        raise ValueError("difficulty_old must be positive")
+    if epoch_len <= 0:
+        raise ValueError("epoch_len must be positive")
+    if T <= 0.0:
+        raise ValueError("T must be positive")
+    if elapsed_time <= 0.0:
+        raise ValueError("elapsed_time must be positive")
+    return difficulty_old * (epoch_len * T) / max(elapsed_time, EPS)
+
+
+class SelfishMiningCanonicalDAASimulation:
+    """Classic Eyal--Sirer selfish mining timed for one canonical DAA epoch."""
+
+    def __init__(
+        self,
+        *,
+        T: float,
+        p: float,
+        gamma: float,
+        seed: int,
+        epoch_len: int,
+        run_id: int,
+        max_events: Optional[int] = None,
+    ) -> None:
+        self.T = float(T)
+        self.p = float(p)
+        self.gamma = float(gamma)
+        self.seed = int(seed)
+        self.epoch_len = int(epoch_len)
+        self.run_id = int(run_id)
+        self.max_events = max_events
+        if self.T <= 0.0:
+            raise ValueError("T must be positive")
+        if not 0.0 < self.p < 1.0:
+            raise ValueError("p must be in (0, 1)")
+        if not 0.0 <= self.gamma <= 1.0:
+            raise ValueError("gamma must be in [0, 1]")
+        if self.epoch_len <= 0:
+            raise ValueError("epoch_len must be positive")
+        if self.max_events is not None and self.max_events <= 0:
+            raise ValueError("max_events must be positive when provided")
+
+        self.rng = np.random.default_rng(self.seed)
+        self.t = 0.0
+        self.difficulty = 1.0
+        self.lead = 0
+        self.in_race = False
+        self.canonical_len = 0
+        self.epoch_miners: List[str] = []
+
+    def _accept_canonical_blocks(self, miners: Sequence[str]) -> None:
+        """Finalize blocks, retaining the first epoch_len for DAA accounting."""
+        remaining = self.epoch_len - len(self.epoch_miners)
+        if remaining > 0:
+            self.epoch_miners.extend(miners[:remaining])
+        self.canonical_len += len(miners)
+
+    def _handle_mine_A(self) -> None:
+        if self.in_race:
+            # 0' --A--> the attacker's published block and new block both win.
+            self._accept_canonical_blocks(("A", "A"))
+            self.lead = 0
+            self.in_race = False
+            return
+        self.lead += 1
+
+    def _handle_mine_H(self) -> None:
+        if self.in_race:
+            if self.rng.random() < self.gamma:
+                # Honest miners extend the attacker's branch.
+                self._accept_canonical_blocks(("A", "H"))
+            else:
+                self._accept_canonical_blocks(("H", "H"))
+            self.lead = 0
+            self.in_race = False
+            return
+
+        if self.lead == 0:
+            self._accept_canonical_blocks(("H",))
+        elif self.lead == 1:
+            self.in_race = True
+        elif self.lead == 2:
+            self._accept_canonical_blocks(("A", "A"))
+            self.lead = 0
+        else:
+            # For lead >= 3, publishing one private block guarantees that block
+            # is canonical while preserving the remaining private lead.
+            self._accept_canonical_blocks(("A",))
+            self.lead -= 1
+
+    def run(self) -> CanonicalDAARunResult:
+        events = 0
+        while len(self.epoch_miners) < self.epoch_len:
+            if self.max_events is not None and events >= self.max_events:
+                raise RuntimeError("Reached max_events before SM DAA epoch completed")
+
+            lam = 1.0 / (self.T * self.difficulty)
+            t_a = self.t + self.rng.exponential(1.0 / (self.p * lam))
+            t_h = self.t + self.rng.exponential(1.0 / ((1.0 - self.p) * lam))
+            self.t = min(t_a, t_h)
+            if t_a <= t_h:
+                self._handle_mine_A()
+            else:
+                self._handle_mine_H()
+            events += 1
+
+        difficulty_new = calculate_canonical_daa(
+            difficulty_old=self.difficulty,
+            epoch_len=self.epoch_len,
+            T=self.T,
+            elapsed_time=self.t,
+        )
+        return CanonicalDAARunResult(
+            strategy="SM",
+            p=self.p,
+            gamma=self.gamma,
+            run_id=self.run_id,
+            seed=self.seed,
+            T=self.T,
+            epoch_len=self.epoch_len,
+            canonical_len_at_stop=self.canonical_len,
+            a_blocks_counted=self.epoch_miners.count("A"),
+            h_blocks_counted=self.epoch_miners.count("H"),
+            t_start=0.0,
+            t_end=self.t,
+            t_total=self.t,
+            difficulty_old=self.difficulty,
+            difficulty_new=difficulty_new,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Parallelism helpers
 # ---------------------------------------------------------------------------
 
@@ -614,6 +809,204 @@ def run_experiments(
     return raw
 
 
+def _derive_canonical_daa_seed(
+    base_seed: int,
+    strategy: str,
+    p: float,
+    run_id: int,
+) -> int:
+    token = f"{base_seed}|canonical_daa|{strategy}|{p:.8f}|{run_id}"
+    digest = hashlib.sha256(token.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+
+
+def _run_ocw_canonical_daa_task(
+    T: float,
+    p: float,
+    seed: int,
+    epoch_len: int,
+    run_id: int,
+    max_events: Optional[int],
+) -> Dict[str, Any]:
+    sim = ChainWithholdSimulation(
+        T=T,
+        p=p,
+        seed=seed,
+        target_blocks=epoch_len,
+        run_id=run_id,
+        max_events=max_events,
+        w_over_T=CANONICAL_DAA_W_OVER_T,
+    )
+    run_result = sim.run()
+    epoch_block_ids = sim.canonical_chain_ids[:epoch_len]
+    boundary_block_id = epoch_block_ids[-1]
+    t_end = sim.blocks_by_id[boundary_block_id].t_publish
+    miners = [sim.blocks_by_id[block_id].miner for block_id in epoch_block_ids]
+    result = CanonicalDAARunResult(
+        strategy="OCW",
+        p=p,
+        w_over_T=CANONICAL_DAA_W_OVER_T,
+        run_id=run_id,
+        seed=seed,
+        T=T,
+        epoch_len=epoch_len,
+        canonical_len_at_stop=run_result.canonical_len,
+        a_blocks_counted=miners.count("A"),
+        h_blocks_counted=miners.count("H"),
+        t_start=0.0,
+        t_end=t_end,
+        t_total=t_end,
+        difficulty_old=sim.difficulty,
+        difficulty_new=calculate_canonical_daa(
+            difficulty_old=sim.difficulty,
+            epoch_len=epoch_len,
+            T=T,
+            elapsed_time=t_end,
+        ),
+    )
+    return result.to_dict()
+
+
+def _run_sm_canonical_daa_task(
+    T: float,
+    p: float,
+    gamma: float,
+    seed: int,
+    epoch_len: int,
+    run_id: int,
+    max_events: Optional[int],
+) -> Dict[str, Any]:
+    sim = SelfishMiningCanonicalDAASimulation(
+        T=T,
+        p=p,
+        gamma=gamma,
+        seed=seed,
+        epoch_len=epoch_len,
+        run_id=run_id,
+        max_events=max_events,
+    )
+    return sim.run().to_dict()
+
+
+def _run_canonical_daa_task(
+    strategy: str,
+    T: float,
+    p: float,
+    gamma: float,
+    seed: int,
+    epoch_len: int,
+    run_id: int,
+    max_events: Optional[int],
+) -> Dict[str, Any]:
+    if strategy == "OCW":
+        return _run_ocw_canonical_daa_task(
+            T, p, seed, epoch_len, run_id, max_events
+        )
+    if strategy == "SM":
+        return _run_sm_canonical_daa_task(
+            T, p, gamma, seed, epoch_len, run_id, max_events
+        )
+    raise ValueError(f"Unknown strategy: {strategy}")
+
+
+def run_canonical_daa_comparison(
+    p_list: Sequence[float] = CANONICAL_DAA_P_VALUES,
+    *,
+    T: float = 10.0,
+    n_repeats: int = 10,
+    epoch_len: int = 2016,
+    gamma: float = SELFISH_GAMMA,
+    base_seed: int = 2026,
+    jobs: int = 10,
+    max_events: Optional[int] = None,
+    show_progress: bool = True,
+) -> List[Dict[str, Any]]:
+    """Compare post-epoch canonical DAA difficulty for OCW and SM."""
+    if T <= 0.0:
+        raise ValueError("T must be positive")
+    if n_repeats <= 0:
+        raise ValueError("n_repeats must be positive")
+    if epoch_len <= 0:
+        raise ValueError("epoch_len must be positive")
+    if jobs <= 0:
+        raise ValueError("jobs must be positive")
+    if not p_list:
+        raise ValueError("p_list must not be empty")
+    if any(not 0.0 < p < 1.0 for p in p_list):
+        raise ValueError("all p values must be in (0, 1)")
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("gamma must be in [0, 1]")
+
+    tasks = [
+        (
+            strategy,
+            T,
+            p,
+            gamma,
+            _derive_canonical_daa_seed(base_seed, strategy, p, run_id),
+            epoch_len,
+            run_id,
+            max_events,
+        )
+        for strategy in ("OCW", "SM")
+        for p in p_list
+        for run_id in range(n_repeats)
+    ]
+    effective_jobs = min(jobs, len(tasks))
+
+    def _collect_with_executor(
+        executor_cls: type[concurrent.futures.Executor],
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        with executor_cls(max_workers=effective_jobs) as executor:
+            futures = [
+                executor.submit(_run_canonical_daa_task, *task) for task in tasks
+            ]
+            if tqdm is not None and show_progress:
+                with tqdm(
+                    total=len(futures),
+                    desc="canonical DAA runs",
+                    unit="run",
+                    dynamic_ncols=True,
+                ) as bar:
+                    for future in concurrent.futures.as_completed(futures):
+                        rows.append(future.result())
+                        bar.update(1)
+            else:
+                for future in concurrent.futures.as_completed(futures):
+                    rows.append(future.result())
+        return rows
+
+    if effective_jobs <= 1:
+        task_iter: Any = tasks
+        if tqdm is not None and show_progress:
+            task_iter = tqdm(
+                tasks,
+                desc="canonical DAA runs",
+                unit="run",
+                dynamic_ncols=True,
+            )
+        raw = [_run_canonical_daa_task(*task) for task in task_iter]
+    else:
+        try:
+            raw = _collect_with_executor(concurrent.futures.ProcessPoolExecutor)
+        except (OSError, PermissionError) as exc:
+            print(
+                "[warn] ProcessPoolExecutor unavailable "
+                f"({exc.__class__.__name__}: {exc}); falling back to threads."
+            )
+            raw = _collect_with_executor(concurrent.futures.ThreadPoolExecutor)
+
+    raw.sort(
+        key=lambda row: (
+            str(row["strategy"]),
+            float(row["p"]),
+            int(row["run_id"]),
+        )
+    )
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # Summary / CSV
 # ---------------------------------------------------------------------------
@@ -648,6 +1041,38 @@ def summarize(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return summary
 
 
+def summarize_canonical_daa(
+    raw: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    grouped: Dict[tuple[str, float], List[Dict[str, Any]]] = {}
+    for row in raw:
+        key = (str(row["strategy"]), float(row["p"]))
+        grouped.setdefault(key, []).append(row)
+
+    summary: List[Dict[str, Any]] = []
+    for strategy, p in sorted(grouped):
+        rows = grouped[(strategy, p)]
+        difficulties = [float(row["difficulty_new"]) for row in rows]
+        elapsed_times = [float(row["t_total"]) for row in rows]
+        n = len(rows)
+        summary.append(
+            {
+                "strategy": strategy,
+                "p": p,
+                "w_over_T": (
+                    CANONICAL_DAA_W_OVER_T if strategy == "OCW" else ""
+                ),
+                "gamma": float(rows[0]["gamma"]) if strategy == "SM" else "",
+                "runs": n,
+                "difficulty_new_mean": mean(difficulties),
+                "difficulty_new_std": stdev(difficulties) if n > 1 else 0.0,
+                "epoch_elapsed_time_mean": mean(elapsed_times),
+                "epoch_elapsed_time_std": stdev(elapsed_times) if n > 1 else 0.0,
+            }
+        )
+    return summary
+
+
 def write_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     row_list = list(rows)
@@ -673,6 +1098,16 @@ def _tbw_orphan_rate(p: float) -> float:
 def _tbw_a_share(p: float) -> float:
     """Theoretical attacker-block rate for TBW."""
     return (3.0 - 2 * p) * p**2
+
+
+def _ocw_difficulty_theory(p: float) -> float:
+    """Placeholder for the OCW post-DAA theoretical difficulty."""
+    return 0.5 * p
+
+
+def _sm_difficulty_theory(p: float) -> float:
+    """Placeholder for the SM post-DAA theoretical difficulty."""
+    return 2.0 * p
 
 
 # ---------------------------------------------------------------------------
@@ -811,6 +1246,96 @@ def plot_results(
     plt_mod.close(fig)
 
 
+def plot_canonical_daa_comparison(
+    summary: Sequence[Dict[str, Any]],
+    figures_dir: Path,
+) -> None:
+    """Plot OCW/SM simulated DAA values and their placeholder theories."""
+    plt_mod = get_plt()
+    if plt_mod is None:
+        print("[warn] matplotlib unavailable, skip canonical DAA plot")
+        return
+    if not summary:
+        print("[warn] empty canonical DAA summary, skip plotting")
+        return
+
+    try:
+        plt_mod.style.use(["science", "ieee", "no-latex"])
+    except Exception:
+        plt_mod.style.use(["science", "ieee"])
+    plt_mod.rcParams["text.usetex"] = False
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    rows_by_strategy: Dict[str, List[Dict[str, Any]]] = {}
+    for row in summary:
+        rows_by_strategy.setdefault(str(row["strategy"]), []).append(row)
+    for rows in rows_by_strategy.values():
+        rows.sort(key=lambda row: float(row["p"]))
+
+    fig, ax = plt_mod.subplots(figsize=(5.5, 4.125))
+    styles = {
+        "OCW": ("#2166AC", "o"),
+        "SM": ("#B2182B", "s"),
+    }
+    for strategy in ("OCW", "SM"):
+        rows = rows_by_strategy.get(strategy, [])
+        if not rows:
+            continue
+        color, marker = styles[strategy]
+        ax.errorbar(
+            [float(row["p"]) for row in rows],
+            [float(row["difficulty_new_mean"]) for row in rows],
+            yerr=[float(row["difficulty_new_std"]) for row in rows],
+            color=color,
+            marker=marker,
+            markersize=4,
+            markerfacecolor="none",
+            capsize=3,
+            linestyle="-",
+            linewidth=1.6,
+            label=f"{strategy} simulation",
+            zorder=3,
+        )
+
+    p_values = [float(row["p"]) for row in summary]
+    p_theory = np.linspace(min(p_values), max(p_values), 400)
+    ax.plot(
+        p_theory,
+        [_ocw_difficulty_theory(float(p)) for p in p_theory],
+        color=styles["OCW"][0],
+        linestyle="--",
+        linewidth=1.6,
+        label=r"OCW theory ($y=0.5p$)",
+        zorder=2,
+    )
+    ax.plot(
+        p_theory,
+        [_sm_difficulty_theory(float(p)) for p in p_theory],
+        color=styles["SM"][0],
+        linestyle="--",
+        linewidth=1.6,
+        label=r"SM theory ($y=2p$)",
+        zorder=2,
+    )
+    ax.set_xlabel(r"Attacker hashrate $p$", fontsize=12)
+    ax.set_ylabel(r"New difficulty $D_{new}$", fontsize=12)
+    ax.tick_params(labelsize=10)
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(True, linestyle="--", alpha=0.6)
+    fig.tight_layout()
+    fig.savefig(
+        figures_dir / "canonical_daa_difficulty_vs_p.pdf",
+        format="pdf",
+        dpi=300,
+    )
+    fig.savefig(
+        figures_dir / "canonical_daa_difficulty_vs_p.png",
+        format="png",
+        dpi=300,
+    )
+    plt_mod.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -846,6 +1371,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-plots", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--max-events", type=int, default=None)
+    parser.add_argument(
+        "--daa-p-list",
+        default=",".join(f"{p:.2f}" for p in CANONICAL_DAA_P_VALUES),
+        help="p values for the OCW/SM canonical DAA comparison",
+    )
+    parser.add_argument(
+        "--daa-repeats",
+        type=int,
+        default=None,
+        help="runs per DAA point (default: use --repeats)",
+    )
+    parser.add_argument(
+        "--selfish-gamma",
+        type=float,
+        default=SELFISH_GAMMA,
+        help="tie-following fraction for selfish mining",
+    )
+    daa_mode = parser.add_mutually_exclusive_group()
+    daa_mode.add_argument(
+        "--skip-daa-comparison",
+        action="store_true",
+        help="skip the OCW/SM canonical DAA module",
+    )
+    daa_mode.add_argument(
+        "--only-daa-comparison",
+        action="store_true",
+        help="run only the OCW/SM canonical DAA module",
+    )
     return parser
 
 
@@ -853,49 +1406,91 @@ def main() -> None:
     args = build_parser().parse_args()
     p_list = _parse_p_list(args.p_list)
     w_over_T_list = _parse_p_list(args.w_over_T_list)
+    daa_p_list = _parse_p_list(args.daa_p_list)
+    daa_repeats = args.repeats if args.daa_repeats is None else args.daa_repeats
     results_dir = Path(args.results_dir)
     figures_dir = Path(args.figures_dir)
 
-    print(
-        f"chain-withhold simulation: T={args.T}, repeats={args.repeats}, "
-        f"target_blocks={args.target_blocks}, jobs={args.jobs}"
-    )
-    print(f"p_list = {p_list}")
-    print(f"w/T list = {w_over_T_list}")
-
-    raw = run_experiments(
-        p_list=p_list,
-        w_over_T_list=w_over_T_list,
-        T=args.T,
-        n_repeats=args.repeats,
-        target_blocks=args.target_blocks,
-        base_seed=args.base_seed,
-        jobs=args.jobs,
-        max_events=args.max_events,
-        show_progress=not args.no_progress,
-    )
-    summary = summarize(raw)
-
-    write_csv(results_dir / "raw_runs.csv", raw)
-    write_csv(results_dir / "summary.csv", summary)
-    print(f"Results written to {results_dir}/")
-
-    # Print summary table
-    print(
-        f"\n{'w/T':>6}  {'p':>6}  {'A_share_mean':>13}  {'A_share_std':>12}  "
-        f"{'orp_mean':>10}  {'orp_std':>9}  {'chain_ext_mean':>14}"
-    )
-    for row in summary:
+    if not args.only_daa_comparison:
         print(
-            f"{row['w_over_T']:>6.1f}  {row['p']:>6.2f}  "
-            f"{row['A_share_mean']:>13.6f}  "
-            f"{row['A_share_std']:>12.6f}  {row['orphan_rate_mean']:>10.6f}  "
-            f"{row['orphan_rate_std']:>9.6f}  {row['chain_extensions_mean']:>14.2f}"
+            f"chain-withhold simulation: T={args.T}, repeats={args.repeats}, "
+            f"target_blocks={args.target_blocks}, jobs={args.jobs}"
         )
+        print(f"p_list = {p_list}")
+        print(f"w/T list = {w_over_T_list}")
 
-    if not args.skip_plots:
-        plot_results(summary, figures_dir)
-        print(f"Figures written to {figures_dir}/")
+        raw = run_experiments(
+            p_list=p_list,
+            w_over_T_list=w_over_T_list,
+            T=args.T,
+            n_repeats=args.repeats,
+            target_blocks=args.target_blocks,
+            base_seed=args.base_seed,
+            jobs=args.jobs,
+            max_events=args.max_events,
+            show_progress=not args.no_progress,
+        )
+        summary = summarize(raw)
+
+        write_csv(results_dir / "raw_runs.csv", raw)
+        write_csv(results_dir / "summary.csv", summary)
+        print(f"Results written to {results_dir}/")
+
+        print(
+            f"\n{'w/T':>6}  {'p':>6}  {'A_share_mean':>13}  "
+            f"{'A_share_std':>12}  {'orp_mean':>10}  {'orp_std':>9}  "
+            f"{'chain_ext_mean':>14}"
+        )
+        for row in summary:
+            print(
+                f"{row['w_over_T']:>6.1f}  {row['p']:>6.2f}  "
+                f"{row['A_share_mean']:>13.6f}  "
+                f"{row['A_share_std']:>12.6f}  "
+                f"{row['orphan_rate_mean']:>10.6f}  "
+                f"{row['orphan_rate_std']:>9.6f}  "
+                f"{row['chain_extensions_mean']:>14.2f}"
+            )
+
+        if not args.skip_plots:
+            plot_results(summary, figures_dir)
+            print(f"Chain-withhold figures written to {figures_dir}/")
+
+    if not args.skip_daa_comparison:
+        print(
+            "\ncanonical-chain DAA comparison: "
+            f"w=10T, p={daa_p_list}, repeats={daa_repeats}, "
+            f"epoch_len={args.target_blocks}, gamma={args.selfish_gamma}"
+        )
+        daa_raw = run_canonical_daa_comparison(
+            p_list=daa_p_list,
+            T=args.T,
+            n_repeats=daa_repeats,
+            epoch_len=args.target_blocks,
+            gamma=args.selfish_gamma,
+            base_seed=args.base_seed,
+            jobs=args.jobs,
+            max_events=args.max_events,
+            show_progress=not args.no_progress,
+        )
+        daa_summary = summarize_canonical_daa(daa_raw)
+        write_csv(results_dir / "canonical_daa_raw_runs.csv", daa_raw)
+        write_csv(results_dir / "canonical_daa_summary.csv", daa_summary)
+
+        print(
+            f"\n{'strategy':>8}  {'p':>6}  {'D_new_mean':>12}  "
+            f"{'D_new_std':>11}  {'epoch_time_mean':>15}"
+        )
+        for row in daa_summary:
+            print(
+                f"{row['strategy']:>8}  {row['p']:>6.2f}  "
+                f"{row['difficulty_new_mean']:>12.6f}  "
+                f"{row['difficulty_new_std']:>11.6f}  "
+                f"{row['epoch_elapsed_time_mean']:>15.3f}"
+            )
+
+        if not args.skip_plots:
+            plot_canonical_daa_comparison(daa_summary, figures_dir)
+            print(f"Canonical DAA comparison figure written to {figures_dir}/")
 
 
 if __name__ == "__main__":
