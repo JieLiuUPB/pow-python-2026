@@ -28,19 +28,29 @@ All repeats are independent and reproducible. Seeds are integers derived from
 the first eight bytes of a SHA-256 hash of the base seed and complete parameter
 point, so parallel execution does not change results.
 
-| Program | Default parameter point | Runs | Seed | Horizon | Figure error bars |
-|---|---|---:|---|---|---|
-| `pow_simulation.py` | Scenario 3: `p=0.65`, canonical DAA; scenario 4: `p=0.55,0.65,0.75,0.85`, published-block DAA; both OCW and SM | 10 | base `2026` + scenario + `p` + run ID + max round | One trajectory to `7*2016*T = 141120`, sampled at rounds `1,3,5,7` | sample standard deviation |
-| `pow_chain_withhold.py` | `p=0.30..0.95` by `0.05`; `w/T=0.5,1,10` | 100 | base `2026` + `p` + `w/T` + run ID | stop when canonical length is at least 2016 | sample standard deviation |
-| `ocw_w_sweep.py` | `alpha=0.65,0.75`; `w/T=0,0.25,0.5,1,2,5,10` | 50 | base `2026` + `alpha` + `w/T` + run ID | stop when canonical length is at least 2016 | 95% CI: `1.96*s/sqrt(n)` |
-| `pow_selfish.py` | `p=0.55..0.95` by `0.05`; `gamma=0` | 10 | base `2026` + `p` + `gamma` + run ID | cross 2016 finalized blocks, then settle the pending state | standard error: `s/sqrt(n)` |
-| `pow_collusion.py` | four cartel/betrayal scenarios; pools `b=0.3,s=0.3,h=0.4` | 10 per scenario | base `20260224` + experiment + scenario + run ID | reach 20160 canonical blocks; report the first 20160 | no error bars; CSV includes sample standard deviation |
-| `pow_three_tolerate.py` | `BetrayTolerated`; pools `b=0.30,s=0.50,h=0.20` | 10 | same scheme as `pow_collusion.py` | reach 2016 canonical blocks; report the first 2016 | no figure |
-| `plot_orphan_rate_comparison.py` | reads OCW and SM summaries | none | none | inherited from input CSVs | sample standard deviation from the input summaries |
+| Program                          | Default parameter point                                                                                        |            Runs | Seed                                              | Horizon                                                            | Figure error bars                                     |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------: | ------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------- |
+| `pow_simulation.py`              | Scenario 3: `p=0.65,0.75`, canonical DAA, `n=1,2,3,5`; scenario 4: `p=0.65,0.75`, public/orphan-aware DAA, `n=1,3,10`; both OCW and SM | 10 per strategy and `p` | base `2026` + scenario + `p` + run ID + max round | Scenario 3 ends at `5*2016*T=100800`; scenario 4 ends at `10*2016*T=201600`; listed `n` values are checkpoints | sample standard deviation |
+| `pow_chain_withhold.py`          | `p=0.30..0.95` by `0.05`; `w/T=0.5,1,10`                                                                       |             100 | base `2026` + `p` + `w/T` + run ID                | stop when canonical length is at least 2016                        | sample standard deviation                             |
+| `ocw_w_sweep.py`                 | `alpha=0.65,0.75`; `w/T=0,0.25,0.5,1,2,5,10`                                                                   |              50 | base `2026` + `alpha` + `w/T` + run ID            | stop when canonical length is at least 2016                        | 95% CI: `1.96*s/sqrt(n)`                              |
+| `pow_selfish.py`                 | `p=0.55..0.95` by `0.05`; `gamma=0`                                                                            |              10 | base `2026` + `p` + `gamma` + run ID              | cross 2016 finalized blocks, then settle the pending state         | standard error: `s/sqrt(n)`                           |
+| `pow_collusion.py`               | four cartel/betrayal scenarios; pools `b=0.3,s=0.3,h=0.4`                                                      | 10 per scenario | base `20260224` + experiment + scenario + run ID  | reach 20160 canonical blocks; report the first 20160               | no error bars; CSV includes sample standard deviation |
+| `pow_three_tolerate.py`          | `BetrayTolerated`; pools `b=0.30,s=0.50,h=0.20`                                                                |              10 | same scheme as `pow_collusion.py`                 | reach 2016 canonical blocks; report the first 2016                 | no figure                                             |
+| `plot_orphan_rate_comparison.py` | reads OCW and SM summaries                                                                                     |            none | none                                              | inherited from input CSVs                                          | sample standard deviation from the input summaries    |
 
-In `pow_simulation.py`, rounds `1,3,5,7` are checkpoints from the same run, not
-four independent runs. Its fixed-time SM comparison stops exactly at the time
-horizon and does not force unpublished blocks onto the chain.
+In `pow_simulation.py`, each `(scenario, strategy, p, run ID)` is one trajectory;
+the listed `n` values are checkpoints, not independent runs. Scenario 3 and the
+OCW part of scenario 4 report `A_blocks/(p*n*epoch_len)`, while scenario 4 SM
+reports `A_blocks/(n*epoch_len)`. Error bars are the sample standard deviation
+of that normalized metric across the 10 runs.
+
+All default SM points have `p>0.5`, so `SelfishMiningDAASimulation` uses its
+majority mode: attacker blocks are released in `epoch_len` batches, and an
+unfinished private batch is counted as eventually canonical at a checkpoint or
+the final time horizon. Scenario 3 adjusts difficulty from canonical-chain
+boundaries, while scenario 4 uses the public count basis. For majority-mode SM
+in scenario 4, that public-work counter includes all attacker and honest work
+that will be published and retains each block's original mining time.
 
 ## Classic selfish-mining baseline
 
@@ -53,9 +63,10 @@ The baseline is the standard Eyal--Sirer lead-state strategy:
 - in state `0'`, an honest miner follows the attacker branch with probability
   `gamma`; otherwise it follows the honest branch. The default is `gamma=0`.
 
-`pow_selfish.py` implements the standalone counting baseline.
-`SelfishMiningDAASimulation` in `pow_simulation.py` implements the same release
-and tie rules on an explicit timed block tree for DAA comparisons.
+`pow_selfish.py` implements the standalone counting baseline. In
+`pow_simulation.py`, `SelfishMiningDAASimulation` uses this lead-state logic only
+for `p<=0.5`; its current default points (`p=0.65,0.75`) use the majority-mode
+epoch release described above, so `gamma` does not affect those default runs.
 
 ## Abstracted factors
 
@@ -68,19 +79,19 @@ and tie rules on an explicit timed block tree for DAA comparisons.
 
 ## Python files
 
-| File | Purpose |
-|---|---|
-| `pow_simulation.py` | Runs fixed-time OCW and classic selfish-mining DAA comparisons and writes checkpoints, summaries, and figures. |
-| `pow_chain_withhold.py` | Runs the chained OCW strategy for several attacker shares and withholding windows. |
-| `ocw_w_sweep.py` | Sweeps `w/T`, compares simulation with theory, and plots 95% confidence intervals. |
-| `pow_selfish.py` | Runs the standalone classic Eyal--Sirer selfish-mining baseline without DAA. |
-| `pow_collusion.py` | Simulates three-pool cartel cooperation, betrayal, breakup, and tolerance. |
-| `pow_three_tolerate.py` | Provides a small runner for only the three-pool `BetrayTolerated` case. |
-| `plot_orphan_rate_comparison.py` | Combines existing OCW and selfish-mining orphan-rate summaries in one figure. |
-| `try.py` | Plots the scratch analytical term `p^2(1-p)/(1+p)`; it is not part of the simulations. |
-| `tests/test_pow_simulation.py` | Tests fixed-time normalization, checkpoint timing, and both DAA count bases. |
-| `tests/test_pow_collusion.py` | Tests betrayal, breakup selection, and `gamma` race splitting. |
-| `tests/test_plot_orphan_rate_comparison.py` | Tests summary loading, legacy path handling, and comparison-plot output. |
+| File                                        | Purpose                                                                                                        |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `pow_simulation.py`                         | Runs fixed-time OCW/SM comparisons with canonical or public/orphan-aware DAA and writes raw runs, checkpoints, epoch statistics, summaries, and figures. |
+| `pow_chain_withhold.py`                     | Runs the chained OCW strategy for several attacker shares and withholding windows.                             |
+| `ocw_w_sweep.py`                            | Sweeps `w/T`, compares simulation with theory, and plots 95% confidence intervals.                             |
+| `pow_selfish.py`                            | Runs the standalone classic Eyal--Sirer selfish-mining baseline without DAA.                                   |
+| `pow_collusion.py`                          | Simulates three-pool cartel cooperation, betrayal, breakup, and tolerance.                                     |
+| `pow_three_tolerate.py`                     | Provides a small runner for only the three-pool `BetrayTolerated` case.                                        |
+| `plot_orphan_rate_comparison.py`            | Combines existing OCW and selfish-mining orphan-rate summaries in one figure.                                  |
+| `try.py`                                    | Plots the scratch analytical term `p^2(1-p)/(1+p)`; it is not part of the simulations.                         |
+| `tests/test_pow_simulation.py`              | Tests normalization, checkpoint timing, majority-mode epoch release, and both DAA count bases.                 |
+| `tests/test_pow_collusion.py`               | Tests betrayal, breakup selection, and `gamma` race splitting.                                                 |
+| `tests/test_plot_orphan_rate_comparison.py` | Tests summary loading, legacy path handling, and comparison-plot output.                                       |
 
 ## Run
 
@@ -105,13 +116,13 @@ Use `python3 <file>.py --help` to see overrides and output paths.
 
 这是一个事件驱动的 PoW 仿真项目。出块服从 Poisson 过程，已发布区块默认瞬时传播。这样做是为了贴合零延迟理论模型并单独研究隐藏与发布策略。
 
-默认实验使用可复现的 SHA-256 派生 seed。不同脚本分别使用固定时间或固定主链高度作为 horizon。误差条可能是标准差、标准误或 95% 置信区间，具体以英文表格为准。
+默认实验使用可复现的 SHA-256 派生 seed。不同脚本分别使用固定时间或固定主链高度作为 horizon。
 
 ## 文件速记
 
 ### `pow_simulation.py`
 
-这是 OCW 与经典自私挖矿的主实验程序。它处理固定时间、DAA、检查点和结果汇总。需要回想主实验流程时先看这个文件。
+这是固定时间 OCW 与 SM 的 DAA 对比主程序。场景 3 在 `p=0.65,0.75` 和 `n=1,2,3,5` 下使用 canonical DAA，场景 4 在相同 `p` 和 `n=1,3,10` 下使用 public/orphan-aware DAA。它对每个策略与 `p` 运行 10 次，并输出 raw runs、checkpoints、epoch statistics、summaries 和图。
 
 ### `pow_chain_withhold.py`
 
@@ -143,7 +154,7 @@ Use `python3 <file>.py --help` to see overrides and output paths.
 
 ### `tests/test_pow_simulation.py`
 
-这个文件测试主实验的关键统计。它检查固定时间归一化、检查点和 DAA。修改 `pow_simulation.py` 后应运行它。
+这个文件测试主实验的关键统计。它检查归一化、检查点、majority-mode 批量发布和 DAA。修改 `pow_simulation.py` 后应运行它。
 
 ### `tests/test_pow_collusion.py`
 

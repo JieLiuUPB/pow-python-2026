@@ -2234,7 +2234,7 @@ def plot_scenario4_comparison(
         selfish_summary_rows,
         fig_dir,
         stem="s4_fixedtime_ratio_ocw_vs_sm",
-        title="OCW vs SM under Orphan-Aware DAA",
+        title="OCW vs SM under Orphan-Block-Aware DAA",
         max_columns=2,
     )
 
