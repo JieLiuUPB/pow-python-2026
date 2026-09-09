@@ -237,11 +237,11 @@ def plot_comparison(
             label="SM theory",
         )
 
-    ax.set_xlabel(r"Attacker hashrate $\alpha$", fontsize=12)
-    ax.set_ylabel("Orphan rate", fontsize=12)
+    ax.set_xlabel(r"Attacker hashrate $\alpha$", fontsize=18)
+    ax.set_ylabel("Orphan rate", fontsize=18)
     ax.tick_params(labelsize=10)
-    ax.set_title("Orphan Rate Comparison")
-    ax.legend(fontsize=10)
+    ax.set_title("Orphan Rate Comparison", fontsize=14.4)
+    ax.legend(fontsize=15)
     ax.margins(x=0.02)
 
     all_values = [*tbw_sim, *tbw_theory_dense, *selfish_sim]

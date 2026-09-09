@@ -46,8 +46,8 @@ SCENARIO4_P_VALUES = [0.65, 0.75]
 SCENARIO3_N_VALUES = [1, 2, 3, 5]
 SCENARIO4_N_VALUES = [1, 3, 10]
 SELFISH_GAMMA = 0.0
-FIXED_TIME_X_LABEL = "physical time: 2016*n*T"
-FIXED_TIME_Y_LABEL = "attack block number/honest block number"
+FIXED_TIME_X_LABEL = "Round n"
+FIXED_TIME_Y_LABEL = "Block Increase Ratio"
 
 
 @dataclass
@@ -2083,10 +2083,11 @@ def plot_fixed_time_ratio(
     ax.axhline(
         1.0, linestyle="--", color="#344054", linewidth=1.6, label="baseline = 1"
     )
-    _set_fixed_time_axes(ax, x_ticks, fontsize=12)
+    _set_fixed_time_axes(ax, x_ticks, fontsize=18)
+    ax.set_ylim(bottom=0.30)
     ax.tick_params(labelsize=10)
-    ax.set_title(title, fontsize=13)
-    ax.legend(loc="best", ncols=2, fontsize=10)
+    ax.set_title(title, fontsize=19.5)
+    ax.legend(loc="lower right", ncols=2, fontsize=15)
     ax.margins(x=0.03)
     ax.grid(True, linestyle="--", alpha=0.6)
 
@@ -2175,8 +2176,8 @@ def plot_strategy_comparison(
                     }
                 )
 
-        _set_fixed_time_axes(ax, x_ticks, fontsize=12)
-        ax.set_title(rf"$\alpha$={p:.2f}", fontsize=13)
+        _set_fixed_time_axes(ax, x_ticks, fontsize=18)
+        ax.set_title(rf"$\alpha$={p:.2f}", fontsize=19.5)
         ax.tick_params(labelsize=10)
         ax.margins(x=0.03)
         ax.grid(True, linestyle="--", alpha=0.6)
@@ -2187,12 +2188,12 @@ def plot_strategy_comparison(
             linewidth=1.6,
             label="baseline = 1",
         )
-        ax.legend(loc="best", fontsize=10)
+        ax.legend(loc="right", fontsize=15)
 
     for ax in flat_axes[len(p_values) :]:
         ax.set_visible(False)
 
-    fig.suptitle(title, fontsize=15)
+    fig.suptitle(title, fontsize=22.5)
     fig.tight_layout()
     save_figure_bundle(fig_dir, stem, fig)
     plt_mod.close(fig)

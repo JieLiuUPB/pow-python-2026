@@ -32,6 +32,7 @@ import numpy as np
 
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
+import scienceplots  # noqa: F401
 
 from pow_chain_withhold import ChainWithholdSimulation
 
@@ -230,7 +231,7 @@ def summarize(raw_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         grouped.setdefault(key, []).append(row)
 
     summary_rows: List[Dict[str, Any]] = []
-    for (alpha, w_over_t) in sorted(grouped):
+    for alpha, w_over_t in sorted(grouped):
         rows = grouped[(alpha, w_over_t)]
         profit_values = [float(row["A_share"]) for row in rows]
         orphan_values = [float(row["orphan_rate"]) for row in rows]
@@ -272,6 +273,12 @@ def build_dense_theory(
 def plot_results(summary_rows: Sequence[Dict[str, Any]], output_base: Path) -> None:
     if not summary_rows:
         return
+
+    try:
+        plt.style.use(["science", "ieee", "no-latex"])
+    except Exception:
+        plt.style.use(["science", "ieee"])
+    plt.rcParams["text.usetex"] = False
 
     alpha_list = sorted({float(row["alpha"]) for row in summary_rows})
     curves = {alpha: build_dense_theory(alpha) for alpha in alpha_list}
@@ -347,20 +354,20 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], output_base: Path) -> N
             label=rf"Sim, {alpha_label}",
         )
 
-    profit_ax.set_title("(a) Attacker Block Share")
-    profit_ax.set_xlabel(r"$w/T$")
-    profit_ax.set_ylabel("Attacker Block Share")
+    profit_ax.set_xlabel(r"$w/T$", fontsize=15)
+    profit_ax.set_ylabel("Attacker Block Share", fontsize=15)
+    profit_ax.tick_params(labelsize=10)
     profit_ax.grid(True, linestyle=":", linewidth=0.8)
     profit_ax.set_xlim(-0.1, 10.1)
 
-    orphan_ax.set_title("(b) Orphan Rate")
-    orphan_ax.set_xlabel(r"$w/T$")
-    orphan_ax.set_ylabel("Orphan rate")
+    orphan_ax.set_xlabel(r"$w/T$", fontsize=15)
+    orphan_ax.set_ylabel("Orphan Rate", fontsize=15)
+    orphan_ax.tick_params(labelsize=10)
     orphan_ax.grid(True, linestyle=":", linewidth=0.8)
     orphan_ax.set_xlim(-0.1, 10.1)
 
-    profit_ax.legend(loc="lower right", fontsize=9, frameon=True)
-    orphan_ax.legend(loc="lower right", fontsize=9, frameon=True)
+    profit_ax.legend(loc="lower right", fontsize=13.5, frameon=True)
+    orphan_ax.legend(loc="lower right", fontsize=13.5, frameon=True)
 
     output_base.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(

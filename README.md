@@ -85,6 +85,7 @@ epoch release described above, so `gamma` does not affect those default runs.
 | `pow_chain_withhold.py`                     | Runs the chained OCW strategy and a one-epoch canonical-DAA comparison of OCW (`w=10T`) with classic SM.       |
 | `ocw_w_sweep.py`                            | Sweeps `w/T`, compares simulation with theory, and plots 95% confidence intervals.                             |
 | `pow_selfish.py`                            | Runs the standalone classic Eyal--Sirer selfish-mining baseline without DAA.                                   |
+| `k_stubborn_sim.py`                         | Compares honest, classic selfish, and configurable k-deficit trail-stubborn mining over a fixed number of block-discovery events. |
 | `pow_collusion.py`                          | Simulates three-pool cartel cooperation, betrayal, breakup, and tolerance.                                     |
 | `pow_three_tolerate.py`                     | Provides a small runner for only the three-pool `BetrayTolerated` case.                                        |
 | `plot_orphan_rate_comparison.py`            | Combines existing OCW and selfish-mining orphan-rate summaries in one figure.                                  |
@@ -104,12 +105,26 @@ python3 pow_chain_withhold.py
 python3 pow_chain_withhold.py --only-daa-comparison
 python3 ocw_w_sweep.py
 python3 pow_selfish.py
+python k_stubborn_sim.py --strategy k_stubborn --alpha 0.35 --gamma 0.0 --k 2 --num-events 1000000 --seed 1
+python k_stubborn_sim.py --strategy k_stubborn --sweep-alpha 0.05:0.49:0.01 --sweep-k 1,2,3,4 --gamma 0.0 --num-events 500000 --output-csv results.csv
 python3 pow_collusion.py
 python3 pow_three_tolerate.py
 python3 -m unittest discover -s tests -v
 ```
 
 Use `python3 <file>.py --help` to see overrides and output paths.
+
+### k-deficit stubborn mining
+
+`k_stubborn_sim.py` is a standalone, dependency-free Monte Carlo simulator.
+It records attacker and honest main-chain revenue only when a fork resolves,
+and reports both miners' orphan contributions plus the system orphan rate.
+For `k_stubborn`, a shorter attacker branch is retained until the honest lead
+reaches `k`; therefore `k=1` is the T1 threshold and abandons as soon as the
+honest branch leads by one block. At the end of a finite event window, a unique
+longest branch is committed; an equal race is settled with probability
+`alpha + (1-alpha)*gamma` in favor of the attacker branch, without adding an
+extra discovery event.
 
 ---
 

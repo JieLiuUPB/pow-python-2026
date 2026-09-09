@@ -410,11 +410,11 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         markerfacecolor="none",
         label="y = x",
     )
-    ax.set_xlabel("Attacker hashrate p", fontsize=12)
-    ax.set_ylabel("Attacker Block Share", fontsize=12)
+    ax.set_xlabel("Attacker hashrate p", fontsize=18)
+    ax.set_ylabel("Attacker Block Share", fontsize=18)
     ax.tick_params(labelsize=10)
-    ax.set_title("Selfish Mining: Attacker Block Share vs p")
-    ax.legend(loc="best", fontsize=10)
+    ax.set_title("Selfish Mining: Attacker Block Share vs p", fontsize=14.4)
+    ax.legend(loc="best", fontsize=15)
     ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     fig.savefig(figures_dir / "revenue_share_vs_p.pdf", format="pdf", dpi=300)
@@ -432,11 +432,11 @@ def plot_results(summary_rows: Sequence[Dict[str, Any]], figures_dir: Path) -> N
         markerfacecolor="none",
         label="Selfish Mining",
     )
-    ax.set_xlabel("Attacker hashrate p", fontsize=12)
-    ax.set_ylabel("Orphan rate", fontsize=12)
+    ax.set_xlabel("Attacker hashrate p", fontsize=18)
+    ax.set_ylabel("Orphan rate", fontsize=18)
     ax.tick_params(labelsize=10)
-    ax.set_title("Selfish Mining: Orphan Rate vs p")
-    ax.legend(loc="best", fontsize=10)
+    ax.set_title("Selfish Mining: Orphan Rate vs p", fontsize=14.4)
+    ax.legend(loc="best", fontsize=15)
     ax.grid(True, linestyle="--", alpha=0.6)
     fig.tight_layout()
     fig.savefig(figures_dir / "orphan_rate_vs_p.pdf", format="pdf", dpi=300)
