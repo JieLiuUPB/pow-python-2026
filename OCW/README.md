@@ -99,17 +99,20 @@ epoch release described above, so `gamma` does not affect those default runs.
 Python 3 and NumPy are required. Plotting uses Matplotlib and SciencePlots;
 Pandas and tqdm are optional helpers.
 
+Run these commands from the repository root. Install the complete runtime
+dependencies first with `python3 -m pip install -r requirements.txt`.
+
 ```bash
 python3 pow_simulation.py --scenarios all
-python3 pow_chain_withhold.py
-python3 pow_chain_withhold.py --only-daa-comparison
+python3 OCW/pow_chain_withhold.py
+python3 OCW/pow_chain_withhold.py --only-daa-comparison
 python3 ocw_w_sweep.py
-python3 pow_selfish.py
-python k_stubborn_sim.py --strategy k_stubborn --alpha 0.35 --gamma 0.0 --k 2 --num-events 1000000 --seed 1
-python k_stubborn_sim.py --strategy k_stubborn --sweep-alpha 0.05:0.49:0.01 --sweep-k 1,2,3,4 --gamma 0.0 --num-events 500000 --output-csv results.csv
-python3 pow_collusion.py
-python3 pow_three_tolerate.py
-python3 -m unittest discover -s tests -v
+python3 OCW/pow_selfish.py
+python3 OCW/k_stubborn_sim.py --strategy k_stubborn --alpha 0.35 --gamma 0.0 --k 2 --num-events 1000000 --seed 1
+python3 OCW/k_stubborn_sim.py --strategy k_stubborn --sweep-alpha 0.05:0.49:0.01 --sweep-k 1,2,3,4 --gamma 0.0 --num-events 500000 --output-csv results.csv
+python3 OCW/pow_collusion.py
+python3 OCW/pow_three_tolerate.py
+python3 -m unittest discover -s OCW/tests -v
 ```
 
 Use `python3 <file>.py --help` to see overrides and output paths.
@@ -182,9 +185,11 @@ extra discovery event.
 
 ## 快速运行
 
+请在仓库根目录执行：
+
 ```bash
 python3 pow_simulation.py --scenarios all
-python3 pow_selfish.py
-python3 pow_collusion.py
-python3 -m unittest discover -s tests -v
+python3 OCW/pow_selfish.py
+python3 OCW/pow_collusion.py
+python3 -m unittest discover -s OCW/tests -v
 ```

@@ -5,14 +5,24 @@ from __future__ import annotations
 import argparse
 from statistics import mean
 
-from OCW.pow_collusion import (
-    SimConfig,
-    build_scenarios,
-    parse_pool_spec,
-    run_experiment,
-    validate_inputs,
-    validate_jobs,
-)
+if __package__:
+    from .pow_collusion import (
+        SimConfig,
+        build_scenarios,
+        parse_pool_spec,
+        run_experiment,
+        validate_inputs,
+        validate_jobs,
+    )
+else:
+    from pow_collusion import (
+        SimConfig,
+        build_scenarios,
+        parse_pool_spec,
+        run_experiment,
+        validate_inputs,
+        validate_jobs,
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
