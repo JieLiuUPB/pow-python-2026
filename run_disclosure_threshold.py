@@ -6,9 +6,9 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from analysis.cartel_incentives import simulate_disclosure_run
-from analysis.cartel_thresholds import disclosure_utilities, ell_star, lambda_value
-from experiments.common import (
+from cartel_incentives import simulate_disclosure_run
+from cartel_thresholds import disclosure_utilities, ell_star, lambda_value
+from common import (
     aggregate,
     alpha_t_grid,
     derive_seed,
@@ -20,7 +20,6 @@ from experiments.common import (
     write_config,
     write_csv,
 )
-
 
 DEFAULT_ALPHAS = "0.55,0.60,0.65,0.70,0.75,0.80"
 
@@ -56,7 +55,9 @@ def main(argv: list[str] | None = None) -> int:
         for alpha_t in alpha_t_grid(alpha, args.alpha_ts):
             for ell in ells:
                 for run_id, base in enumerate(bases):
-                    seed = derive_seed(base, "disclosure_threshold", alpha, alpha_t, ell, args.gamma)
+                    seed = derive_seed(
+                        base, "disclosure_threshold", alpha, alpha_t, ell, args.gamma
+                    )
                     tasks.append(
                         {
                             "run_id": run_id,
@@ -75,26 +76,40 @@ def main(argv: list[str] | None = None) -> int:
     summary = aggregate(
         raw,
         group_fields=("alpha", "alpha_l", "alpha_t", "ell", "gamma"),
-        metrics=("u_obey_sim", "u_betray_sim", "utility_difference_sim", "recovery_probability_sim"),
+        metrics=(
+            "u_obey_sim",
+            "u_betray_sim",
+            "utility_difference_sim",
+            "recovery_probability_sim",
+        ),
     )
     for row in summary:
         u_betray, u_obey = disclosure_utilities(
-            float(row["alpha"]), float(row["alpha_t"]), int(row["ell"]), float(row["gamma"])
+            float(row["alpha"]),
+            float(row["alpha_t"]),
+            int(row["ell"]),
+            float(row["gamma"]),
         )
         row.update(
             lambda_theory=lambda_value(float(row["alpha"]), float(row["alpha_t"])),
             u_obey_theory=u_obey,
             u_betray_theory=u_betray,
             utility_difference_theory=u_obey - u_betray,
-            ell_star_theory=ell_star(float(row["alpha"]), float(row["alpha_t"]), float(row["gamma"])),
+            ell_star_theory=ell_star(
+                float(row["alpha"]), float(row["alpha_t"]), float(row["gamma"])
+            ),
         )
     ensure_output_tree(args.output_root)
     write_csv(args.output_root / "raw" / "runs.csv", raw)
     write_csv(args.output_root / "aggregate" / "summary.csv", summary)
     config = vars(args).copy()
-    config.update(effective_runs=len(bases), effective_seed_bases=",".join(map(str, bases)))
+    config.update(
+        effective_runs=len(bases), effective_seed_bases=",".join(map(str, bases))
+    )
     write_config(args.output_root, config)
-    print(f"wrote {len(raw)} raw rows and {len(summary)} aggregate rows to {args.output_root}")
+    print(
+        f"wrote {len(raw)} raw rows and {len(summary)} aggregate rows to {args.output_root}"
+    )
     return 0
 
 

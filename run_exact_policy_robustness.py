@@ -6,9 +6,9 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from analysis.cartel_incentives import simulate_exact_policy_run
-from analysis.cartel_thresholds import B_lose, stubborn_utilities
-from experiments.common import (
+from cartel_incentives import simulate_exact_policy_run
+from cartel_thresholds import B_lose, stubborn_utilities
+from common import (
     aggregate,
     alpha_t_grid,
     derive_seed,
@@ -52,14 +52,28 @@ def main(argv: list[str] | None = None) -> int:
             for k in parse_ints(args.ks):
                 for d in range(1, k):
                     for run_id, base in enumerate(bases):
-                        seed = derive_seed(base, "exact_policy_robustness", alpha, alpha_t, k, d, args.gamma, not args.no_disclosure_rule)
+                        seed = derive_seed(
+                            base,
+                            "exact_policy_robustness",
+                            alpha,
+                            alpha_t,
+                            k,
+                            d,
+                            args.gamma,
+                            not args.no_disclosure_rule,
+                        )
                         tasks.append(
                             {
                                 "run_id": run_id,
                                 "seed_base": base,
                                 "simulation": {
-                                    "alpha": alpha, "alpha_t": alpha_t, "d": d, "k": k,
-                                    "gamma": args.gamma, "trials": args.trials, "seed": seed,
+                                    "alpha": alpha,
+                                    "alpha_t": alpha_t,
+                                    "d": d,
+                                    "k": k,
+                                    "gamma": args.gamma,
+                                    "trials": args.trials,
+                                    "seed": seed,
                                     "disclose": not args.no_disclosure_rule,
                                 },
                             }
@@ -67,12 +81,29 @@ def main(argv: list[str] | None = None) -> int:
     raw = run_parallel(_run_task, tasks, args.jobs)
     summary = aggregate(
         raw,
-        group_fields=("alpha", "alpha_l", "alpha_t", "d", "k", "gamma", "disclosure_rule"),
-        metrics=("u_cartel_exact_sim", "u_honest_exact_sim", "utility_difference_exact_sim"),
+        group_fields=(
+            "alpha",
+            "alpha_l",
+            "alpha_t",
+            "d",
+            "k",
+            "gamma",
+            "disclosure_rule",
+        ),
+        metrics=(
+            "u_cartel_exact_sim",
+            "u_honest_exact_sim",
+            "utility_difference_exact_sim",
+        ),
     )
     grouped: dict[tuple[float, float, float, int], list[dict[str, Any]]] = {}
     for row in summary:
-        alpha, alpha_t, d, k = float(row["alpha"]), float(row["alpha_t"]), int(row["d"]), int(row["k"])
+        alpha, alpha_t, d, k = (
+            float(row["alpha"]),
+            float(row["alpha_t"]),
+            int(row["d"]),
+            int(row["k"]),
+        )
         u_cartel, u_honest = stubborn_utilities(alpha, alpha_t, d, k, 2)
         row["u_cartel_theory_m2"] = u_cartel
         row["u_honest_theory_m2"] = u_honest
@@ -81,16 +112,28 @@ def main(argv: list[str] | None = None) -> int:
     thresholds = []
     for (alpha, alpha_l, alpha_t, k), rows in sorted(grouped.items()):
         exact = max(
-            (int(row["d"]) for row in rows if float(row["utility_difference_exact_sim_mean"]) >= 0.0),
+            (
+                int(row["d"])
+                for row in rows
+                if float(row["utility_difference_exact_sim_mean"]) >= 0.0
+            ),
             default=0,
         )
         theory = B_lose(alpha, alpha_t, k, 2)
         thresholds.append(
             {
-                "alpha": alpha, "alpha_l": alpha_l, "alpha_t": alpha_t, "k": k,
-                "B_lose_theory_m2": theory, "B_lose_exact_simulation": exact,
+                "alpha": alpha,
+                "alpha_l": alpha_l,
+                "alpha_t": alpha_t,
+                "k": k,
+                "B_lose_theory_m2": theory,
+                "B_lose_exact_simulation": exact,
                 "exact_minus_theory": exact - theory,
-                "classification": "exact" if exact == theory else ("m2_conservative" if exact > theory else "m2_optimistic"),
+                "classification": (
+                    "exact"
+                    if exact == theory
+                    else ("m2_conservative" if exact > theory else "m2_optimistic")
+                ),
             }
         )
     ensure_output_tree(args.output_root)
@@ -98,9 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(args.output_root / "aggregate" / "summary.csv", summary)
     write_csv(args.output_root / "aggregate" / "thresholds.csv", thresholds)
     config = vars(args).copy()
-    config.update(effective_runs=len(bases), effective_seed_bases=",".join(map(str, bases)))
+    config.update(
+        effective_runs=len(bases), effective_seed_bases=",".join(map(str, bases))
+    )
     write_config(args.output_root, config)
-    print(f"wrote {len(raw)} raw rows, {len(summary)} aggregate rows, and {len(thresholds)} comparisons to {args.output_root}")
+    print(
+        f"wrote {len(raw)} raw rows, {len(summary)} aggregate rows, and {len(thresholds)} comparisons to {args.output_root}"
+    )
     return 0
 
 

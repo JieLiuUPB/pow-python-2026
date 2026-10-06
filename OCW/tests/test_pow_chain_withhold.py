@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pow_chain_withhold import (
+from OCW.pow_chain_withhold import (
     SelfishMiningCanonicalDAASimulation,
     _ocw_difficulty_theory,
     _sm_difficulty_theory,

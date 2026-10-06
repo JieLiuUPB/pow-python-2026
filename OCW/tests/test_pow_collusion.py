@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import replace
 
-from pow_collusion import (
+from OCW.pow_collusion import (
     BetrayConfig,
     CollusionSimulation,
     ScenarioConfig,

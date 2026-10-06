@@ -3,14 +3,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from pow_simulation import (
-    Block,
+from OCW.pow_simulation import (
     SCENARIO3_N_VALUES,
     SCENARIO4_N_VALUES,
     SCENARIO4_P_VALUES,
+    Block,
     SelfishMiningDAASimulation,
-    TimeCheckpointResult,
     TBWSimulation,
+    TimeCheckpointResult,
     build_fixed_time_ratio_summary_rows,
     plot_scenario3,
     scenario4,
@@ -19,7 +19,9 @@ from pow_simulation import (
 
 
 class FixedTimeSummaryTests(unittest.TestCase):
-    def test_build_fixed_time_ratio_summary_rows_uses_fixed_time_baseline_ratio(self) -> None:
+    def test_build_fixed_time_ratio_summary_rows_uses_fixed_time_baseline_ratio(
+        self,
+    ) -> None:
         checkpoint_results = [
             TimeCheckpointResult(
                 scenario="scenario3_daa_by_time",
@@ -61,13 +63,17 @@ class FixedTimeSummaryTests(unittest.TestCase):
         expected_baseline = 0.55 * 1 * 2016
         expected_blocks_mean = (1300 + 1500) / 2.0
         expected_mean = expected_blocks_mean / expected_baseline
-        self.assertEqual(rows[0]["metric"], "A_blocks_canonical_fixedtime_n_round_over_pn2016")
+        self.assertEqual(
+            rows[0]["metric"], "A_blocks_canonical_fixedtime_n_round_over_pn2016"
+        )
         self.assertEqual(rows[0]["physical_time"], 2016 * 10.0)
         self.assertEqual(rows[0]["attacker_blocks_mean"], expected_blocks_mean)
         self.assertEqual(rows[0]["normalization_blocks"], expected_baseline)
         self.assertAlmostEqual(rows[0]["metric_mean"], expected_mean)
 
-    def test_build_fixed_time_ratio_summary_rows_uses_selfish_checkpoint_ratio_too(self) -> None:
+    def test_build_fixed_time_ratio_summary_rows_uses_selfish_checkpoint_ratio_too(
+        self,
+    ) -> None:
         checkpoint_results = [
             TimeCheckpointResult(
                 scenario="scenario4_selfish_public_daa_by_time",
@@ -109,7 +115,9 @@ class FixedTimeSummaryTests(unittest.TestCase):
         baseline = 0.65 * 2 * 2016
         expected_blocks_mean = (2100.0 + 2300.0) / 2.0
         expected_mean = expected_blocks_mean / baseline
-        self.assertEqual(rows[0]["metric"], "A_blocks_canonical_fixedtime_n_round_over_pn2016")
+        self.assertEqual(
+            rows[0]["metric"], "A_blocks_canonical_fixedtime_n_round_over_pn2016"
+        )
         self.assertEqual(rows[0]["physical_time"], 4032 * 10.0)
         self.assertEqual(rows[0]["attacker_blocks_mean"], expected_blocks_mean)
         self.assertEqual(rows[0]["normalization_blocks"], baseline)
@@ -269,7 +277,9 @@ class SelfishDifficultyAdjustmentTests(unittest.TestCase):
         self.assertEqual(sim.epoch_stats[0].a_blocks_counted, 2)
         self.assertEqual(sim.epoch_stats[0].h_blocks_counted, 1)
 
-    def test_majority_attacker_reveals_a_full_private_epoch_and_triggers_daa(self) -> None:
+    def test_majority_attacker_reveals_a_full_private_epoch_and_triggers_daa(
+        self,
+    ) -> None:
         sim = SelfishMiningDAASimulation(
             T=10.0,
             p=0.75,
@@ -325,8 +335,12 @@ class SelfishDifficultyAdjustmentTests(unittest.TestCase):
         )
 
         sim._publish_block(Block(id=1, parent_id=0, height=1, miner="A", t_publish=5.0))
-        sim._publish_block(Block(id=2, parent_id=1, height=2, miner="H", t_publish=10.0))
-        sim._publish_block(Block(id=3, parent_id=0, height=1, miner="A", t_publish=12.0))
+        sim._publish_block(
+            Block(id=2, parent_id=1, height=2, miner="H", t_publish=10.0)
+        )
+        sim._publish_block(
+            Block(id=3, parent_id=0, height=1, miner="A", t_publish=12.0)
+        )
 
         sim._maybe_adjust_difficulty()
 
@@ -350,8 +364,12 @@ class SelfishDifficultyAdjustmentTests(unittest.TestCase):
         )
 
         sim._publish_block(Block(id=1, parent_id=0, height=1, miner="A", t_publish=5.0))
-        sim._publish_block(Block(id=2, parent_id=1, height=2, miner="H", t_publish=10.0))
-        sim._publish_block(Block(id=3, parent_id=0, height=1, miner="A", t_publish=12.0))
+        sim._publish_block(
+            Block(id=2, parent_id=1, height=2, miner="H", t_publish=10.0)
+        )
+        sim._publish_block(
+            Block(id=3, parent_id=0, height=1, miner="A", t_publish=12.0)
+        )
 
         sim._maybe_adjust_difficulty()
 
@@ -375,9 +393,7 @@ class Scenario4NormalizationTests(unittest.TestCase):
             for row in summary_rows:
                 expected_baseline = float(row["p"]) * int(row["n"]) * 4
                 self.assertEqual(row["normalization_blocks"], expected_baseline)
-                self.assertEqual(
-                    row["metric"], "A_blocks_canonical_fixedtime_over_pn4"
-                )
+                self.assertEqual(row["metric"], "A_blocks_canonical_fixedtime_over_pn4")
                 self.assertAlmostEqual(
                     row["metric_mean"],
                     row["attacker_blocks_mean"] / expected_baseline,
@@ -408,9 +424,7 @@ class Scenario4NormalizationTests(unittest.TestCase):
                 expected_baseline = int(row["n"]) * 4
                 self.assertEqual(row["physical_time"], int(row["n"]) * 4 * 2.0)
                 self.assertEqual(row["normalization_blocks"], expected_baseline)
-                self.assertEqual(
-                    row["metric"], "A_blocks_canonical_fixedtime_over_n4"
-                )
+                self.assertEqual(row["metric"], "A_blocks_canonical_fixedtime_over_n4")
                 self.assertAlmostEqual(
                     row["metric_mean"],
                     row["attacker_blocks_mean"] / expected_baseline,

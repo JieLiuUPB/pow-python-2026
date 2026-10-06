@@ -7,9 +7,9 @@ import math
 from pathlib import Path
 from typing import Any
 
-from analysis.cartel_incentives import simulate_tolerance_run
-from analysis.cartel_thresholds import rho_solo, rho_tolerate, tolerate_is_optimal
-from experiments.common import (
+from cartel_incentives import simulate_tolerance_run
+from cartel_thresholds import rho_solo, rho_tolerate, tolerate_is_optimal
+from common import (
     aggregate,
     derive_seed,
     ensure_output_tree,
@@ -19,7 +19,6 @@ from experiments.common import (
     write_config,
     write_csv,
 )
-
 
 REGIMES = ("TOLERATE", "EXPEL_AND_SOLO_WITHHOLD", "HONEST")
 
@@ -54,7 +53,9 @@ def main(argv: list[str] | None = None) -> int:
             for w_over_t in parse_floats(args.w_over_ts):
                 for regime in REGIMES:
                     for run_id, base in enumerate(bases):
-                        seed = derive_seed(base, "tolerance_region", alpha_l, alpha_t, w_over_t, regime)
+                        seed = derive_seed(
+                            base, "tolerance_region", alpha_l, alpha_t, w_over_t, regime
+                        )
                         tasks.append(
                             {
                                 "run_id": run_id,
@@ -91,9 +92,13 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(args.output_root / "raw" / "runs.csv", raw)
     write_csv(args.output_root / "aggregate" / "summary.csv", summary)
     config = vars(args).copy()
-    config.update(effective_runs=len(bases), effective_seed_bases=",".join(map(str, bases)))
+    config.update(
+        effective_runs=len(bases), effective_seed_bases=",".join(map(str, bases))
+    )
     write_config(args.output_root, config)
-    print(f"wrote {len(raw)} raw rows and {len(summary)} aggregate rows to {args.output_root}")
+    print(
+        f"wrote {len(raw)} raw rows and {len(summary)} aggregate rows to {args.output_root}"
+    )
     return 0
 
 

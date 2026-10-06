@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import plot_orphan_rate_comparison as comparison
+import OCW.plot_orphan_rate_comparison as comparison
 
 
 class LoadTBWSummaryTests(unittest.TestCase):
@@ -33,7 +33,9 @@ class LoadTBWSummaryTests(unittest.TestCase):
 
 
 class ResolveTBWSummaryPathTests(unittest.TestCase):
-    def test_default_tbw_summary_path_falls_back_to_legacy_chain_withhold_summary(self) -> None:
+    def test_default_tbw_summary_path_falls_back_to_legacy_chain_withhold_summary(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             default_path = tmp_path / "results" / "chain_withhold_summary.csv"
@@ -41,9 +43,9 @@ class ResolveTBWSummaryPathTests(unittest.TestCase):
             legacy_path.parent.mkdir(parents=True, exist_ok=True)
             legacy_path.write_text("p\n0.55\n", encoding="utf-8")
 
-            with patch.object(comparison, "DEFAULT_TBW_SUMMARY", default_path), patch.object(
-                comparison, "LEGACY_TBW_SUMMARY", legacy_path
-            ):
+            with patch.object(
+                comparison, "DEFAULT_TBW_SUMMARY", default_path
+            ), patch.object(comparison, "LEGACY_TBW_SUMMARY", legacy_path):
                 resolved = comparison.resolve_tbw_summary_path(str(default_path))
 
             self.assertEqual(resolved, legacy_path)
@@ -55,9 +57,9 @@ class ResolveTBWSummaryPathTests(unittest.TestCase):
             default_path = tmp_path / "results" / "chain_withhold_summary.csv"
             legacy_path = tmp_path / "results" / "chain_withhold" / "summary.csv"
 
-            with patch.object(comparison, "DEFAULT_TBW_SUMMARY", default_path), patch.object(
-                comparison, "LEGACY_TBW_SUMMARY", legacy_path
-            ):
+            with patch.object(
+                comparison, "DEFAULT_TBW_SUMMARY", default_path
+            ), patch.object(comparison, "LEGACY_TBW_SUMMARY", legacy_path):
                 resolved = comparison.resolve_tbw_summary_path(str(custom_path))
 
             self.assertEqual(resolved, custom_path)
