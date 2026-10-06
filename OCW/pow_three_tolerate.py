@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from statistics import mean
 
-from pow_collusion import (
+from OCW.pow_collusion import (
     SimConfig,
     build_scenarios,
     parse_pool_spec,

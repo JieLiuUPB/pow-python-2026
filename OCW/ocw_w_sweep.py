@@ -34,7 +34,7 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import scienceplots  # noqa: F401
 
-from pow_chain_withhold import ChainWithholdSimulation
+from OCW.pow_chain_withhold import ChainWithholdSimulation
 
 DEFAULT_ALPHA_LIST = (0.65, 0.75)
 DEFAULT_W_OVER_T_LIST = (0.0, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)
