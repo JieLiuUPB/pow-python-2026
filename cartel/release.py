@@ -5,9 +5,10 @@ Eq. 4) to check the closed-form threshold ell* of Theorem 1.
 """
 
 import matplotlib.pyplot as plt
+import numpy as np
 
-from common import COLORS, cartel_grid, heatmap, main, monte_carlo, save
-from theory import ell_star, omega, withhold_utility
+from cartel.theory import ell_star, omega, withhold_utility
+from harness import COLORS, heatmap, main, monte_carlo
 
 ALPHAS = (0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80)
 LEADS = range(1, 11)
@@ -30,7 +31,8 @@ def simulate(rng, alpha, alpha_t, ell):
 
 
 def run():
-    points = [dict(alpha=a, alpha_t=t, ell=ell) for a, t in cartel_grid(ALPHAS) for ell in LEADS]
+    points = [dict(alpha=a, alpha_t=t, ell=ell)
+              for a in ALPHAS for t in np.arange(0.05, a - 0.04, 0.05).round(2).tolist() for ell in LEADS]
     df = monte_carlo(simulate, points)
     df["withhold_theory"] = [withhold_utility(a, t, ell) for a, t, ell in zip(df.alpha, df.alpha_t, df.ell)]
     df["ell_star"] = [ell_star(a, t) for a, t in zip(df.alpha, df.alpha_t)]
@@ -38,7 +40,7 @@ def run():
 
 
 def plot(df):
-    fig, ax = plt.subplots(figsize=(3.4, 2.5))
+    utility, ax = plt.subplots(figsize=(3.4, 2.5))
     for color, t in zip(COLORS, (0.05, 0.15, 0.25)):
         d = df[(df.alpha == 0.35) & (df.alpha_t == t)]
         ax.plot(d.ell, d.withhold_theory - 1 - t, color=color, lw=1)
@@ -48,14 +50,13 @@ def plot(df):
     ax.set(xlabel=r"Private lead $\ell$", ylabel=r"$U_{\rm withhold}-U_{\rm publish}$",
            title=r"$\alpha=0.35$; lines: theory, dots: simulation")
     ax.legend()
-    save(fig, "release_utility")
 
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    threshold, ax = plt.subplots(figsize=(3.4, 2.6))
     heatmap(ax, df.pivot_table("ell_star", "alpha", "alpha_t"))
     ax.set(xlabel=r"Traitor hashrate $\alpha_t$", ylabel=r"Cartel hashrate $\alpha$",
            title=r"Release threshold $\ell^\star$")
-    save(fig, "release_threshold")
+    return {"release_utility": utility, "release_threshold": threshold}
 
 
 if __name__ == "__main__":
-    main("release", run, plot)
+    main(__file__, run, plot)

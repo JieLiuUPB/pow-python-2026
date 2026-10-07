@@ -14,20 +14,20 @@ canonical blocks. The tie-breaking parameter is `γ = 0` throughout.
 | `stubborn.py`  | §5    | The cartel branch trails by `b` blocks. Should the traitor keep mining on it?                    |
 | `tolerance.py` | §6    | The traitor betrayed. Should the loyal miner keep sharing information with it or expel it?       |
 
-`theory.py` holds the closed forms (equation numbers refer to the paper), and
-`common.py` holds the parallel Monte Carlo runner and plotting helpers.
+`theory.py` holds the closed forms (equation numbers refer to the paper).
 
 ## Run
 
+From the repository root:
+
 ```bash
 pip install -r requirements.txt
-cd cartel
-python release.py         # simulate, write results/release.csv, plot
-python release.py plot    # replot from the saved CSV only
+python -m cartel.release        # simulate, write results/release.csv, plot
+python -m cartel.release plot   # replot from the saved CSV only
 ```
 
-`release.py` takes about 15 s and `stubborn.py` about 1 min on 12 cores.
-`tolerance.py` takes a few seconds because it solves Markov chains exactly.
+`release` takes about 15 s and `stubborn` about 1 min on 12 cores.
+`tolerance` takes a few seconds because it solves Markov chains exactly.
 Each grid point is simulated in 30 independent seeded runs, and the error bars
 are 95% confidence intervals. The results (CSV and PNG) are committed in
 `results/`.

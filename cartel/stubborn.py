@@ -9,9 +9,10 @@ selfish phase as a race to lead M = 2.
 """
 
 import matplotlib.pyplot as plt
+import numpy as np
 
-from common import COLORS, cartel_grid, heatmap, main, monte_carlo, save
-from theory import b_lose, branch_payoffs
+from cartel.theory import b_lose, branch_payoffs
+from harness import COLORS, heatmap, main, monte_carlo
 
 ALPHAS = (0.55, 0.60, 0.65, 0.70, 0.75)
 CAPS = (2, 3, 4, 5, 6, 8)  # k: loyal miners abandon the cartel branch at deficit k
@@ -63,7 +64,8 @@ def simulate(rng, alpha, alpha_t, k, b):
 
 
 def run():
-    points = [dict(alpha=a, alpha_t=t, k=k, b=b) for a, t in cartel_grid(ALPHAS) for k in CAPS for b in range(1, k)]
+    points = [dict(alpha=a, alpha_t=t, k=k, b=b) for a in ALPHAS
+              for t in np.arange(0.05, a - 0.04, 0.05).round(2).tolist() for k in CAPS for b in range(1, k)]
     df = monte_carlo(simulate, points)
     theory = [branch_payoffs(a, t, b, k) for a, t, k, b in zip(df.alpha, df.alpha_t, df.k, df.b)]
     df["cartel_theory"], df["honest_theory"] = zip(*theory)
@@ -73,18 +75,17 @@ def run():
 
 def plot(df):
     d = df[(df.alpha == 0.65) & (df.alpha_t == 0.15) & (df.k == 6)]
-    fig, ax = plt.subplots(figsize=(3.4, 2.5))
+    payoff, ax = plt.subplots(figsize=(3.4, 2.5))
     for color, branch, label in ((COLORS[2], "cartel", "Cartel branch $P_C$"), (COLORS[1], "honest", "Honest branch $P_H$")):
         ax.plot(d.b, d[f"{branch}_theory"], color=color, lw=1)
         ax.errorbar(d.b, d[branch], d[f"{branch}_ci"], fmt="o", ms=3, capsize=2, color=color, label=label)
     ax.set(xlabel=r"Cartel deficit $b$", ylabel="P(traitor block canonical)",
            title=r"$\alpha=0.65,\ \alpha_t=0.15,\ k=6$; lines: theory")
     ax.legend()
-    save(fig, "stubborn_payoff")
 
     # Simulated threshold: the largest deficit where following still pays.
     df["b_lose_sim"] = df.b.where(df.cartel >= df.honest, 0)
-    fig, axes = plt.subplots(2, 3, figsize=(7, 4.6), sharex=True, sharey=True)
+    threshold, axes = plt.subplots(2, 3, figsize=(7, 4.6), sharex=True, sharey=True)
     for ax, k in zip(axes.flat, CAPS):
         d = df[df.k == k]
         heatmap(ax, d.pivot_table("b_lose", "alpha", "alpha_t"), d.pivot_table("b_lose_sim", "alpha", "alpha_t", "max"))
@@ -93,10 +94,10 @@ def plot(df):
         ax.set_xlabel(r"$\alpha_t$")
     for ax in axes[:, 0]:
         ax.set_ylabel(r"$\alpha$")
-    fig.suptitle(r"$B_{\rm lose}$: colour = theory, number = simulation")
-    fig.tight_layout()
-    save(fig, "stubborn_threshold")
+    threshold.suptitle(r"$B_{\rm lose}$: colour = theory, number = simulation")
+    threshold.tight_layout()
+    return {"stubborn_payoff": payoff, "stubborn_threshold": threshold}
 
 
 if __name__ == "__main__":
-    main("stubborn", run, plot)
+    main(__file__, run, plot)

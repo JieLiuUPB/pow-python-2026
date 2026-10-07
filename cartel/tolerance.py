@@ -19,12 +19,12 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import TwoSlopeNorm
 
-from common import COLORS, main, save
-from theory import ell_star
+from cartel.theory import ell_star
+from harness import COLORS, main
 
 CAPS = (1, 2, 4, 8)  # k_s
-STEP = 0.025
-GRID = [(l, t) for l in np.arange(STEP, 1, STEP).round(3) for t in np.arange(STEP, 1, STEP).round(3) if l + t < 1]
+SHARES = np.arange(0.025, 1, 0.025).round(3).tolist()  # alpha_l and alpha_t grid
+GRID = [(l, t) for l in SHARES for t in SHARES if l + t < 1]
 
 
 def transitions(s, alpha_l, alpha_t, ks, ell):
@@ -84,17 +84,16 @@ def run():
 
 def plot(df):
     df["gain"] = df.psi_tol - np.maximum(df.alpha_l, df.psi_solo)
-    fig, axes = plt.subplots(1, len(CAPS), figsize=(7.2, 2.3), sharey=True)
+    region, axes = plt.subplots(1, len(CAPS), figsize=(7.2, 2.3), sharey=True)
     for ax, ks in zip(axes, CAPS):
         g = df[df.ks == ks].pivot_table("gain", "alpha_l", "alpha_t")
         image = ax.pcolormesh(g.columns, g.index, g, cmap="RdBu", norm=TwoSlopeNorm(0, -0.1, 0.1), shading="nearest")
         ax.contour(g.columns, g.index, g, levels=[0], colors="black", linewidths=0.7)
         ax.set(title=f"$k_s={ks}$", xlabel=r"$\alpha_t$", xticks=(0.2, 0.6), aspect="equal")
     axes[0].set_ylabel(r"$\alpha_l$")
-    fig.colorbar(image, ax=axes, shrink=0.8, label="Tolerance gain\n" r"$\psi_{\rm tol}-\max(\alpha_l,\psi_{\rm solo})$")
-    save(fig, "tolerance_region")
+    region.colorbar(image, ax=axes, shrink=0.8, label="Tolerance gain\n" r"$\psi_{\rm tol}-\max(\alpha_l,\psi_{\rm solo})$")
 
-    fig, axes = plt.subplots(1, 3, figsize=(7, 2.3), sharey=True)
+    share, axes = plt.subplots(1, 3, figsize=(7, 2.3), sharey=True)
     for ax, t in zip(axes, (0.10, 0.20, 0.30)):
         d = df[(df.ks == 2) & (df.alpha_t == t)]
         for color, y, label in zip(COLORS, ("alpha_l", "psi_solo", "psi_tol"), ("Honest", "Expel, withhold alone", "Tolerate")):
@@ -102,9 +101,9 @@ def plot(df):
         ax.set(title=rf"$\alpha_t={t:.2f}$, $k_s=2$", xlabel=r"$\alpha_l$")
     axes[0].set_ylabel(r"Loyal share / $\alpha_l$")
     axes[0].legend()
-    fig.tight_layout()
-    save(fig, "tolerance_share")
+    share.tight_layout()
+    return {"tolerance_region": region, "tolerance_share": share}
 
 
 if __name__ == "__main__":
-    main("tolerance", run, plot)
+    main(__file__, run, plot)
