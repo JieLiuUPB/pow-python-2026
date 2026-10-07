@@ -220,3 +220,7 @@ __marimo__/
 *.pdf
 *.png
 *.csv
+CONTINUITY.md
+# Committed experiment results
+!*/results/*.png
+!*/results/*.csv
