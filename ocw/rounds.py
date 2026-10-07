@@ -7,15 +7,19 @@ Difficulty adjusts every 2016 counted blocks:
 - canonical DAA counts the canonical chain: OCW (w = 10T) vs selfish mining;
 - public DAA counts every published block, orphans included: OCW attacker
   and honest miners.
+Lines are the closed forms of the paper's Appendix B, dots the simulation.
 """
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 from harness import COLORS, main, monte_carlo
 from ocw.chain import EPOCH, Net
+from ocw.theory import q, ratio, rho
 
 ALPHAS = (0.65, 0.75)
 ROUNDS = range(1, 11)
+W = 10.0  # withholding window, in units of T
 
 
 def selfish(rng, alpha, horizon):
@@ -36,7 +40,7 @@ def selfish(rng, alpha, horizon):
 def simulate(rng, strategy, daa, alpha, n):
     if strategy == "SM":
         return {"attacker": selfish(rng, alpha, n * EPOCH) / (alpha * n * EPOCH), "honest": 0.0}
-    net = Net(rng, {"A": alpha, "H": 1 - alpha}, cartel={"A"}, daa=daa)
+    net = Net(rng, {"A": alpha, "H": 1 - alpha}, cartel={"A"}, w=W, daa=daa)
     while net.step(until=n * EPOCH):
         pass
     miners = [net.miner[b] for b in net.chain()]
@@ -48,8 +52,20 @@ def run():
     return monte_carlo(simulate, [dict(strategy=s, daa=d, alpha=a, n=n) for s, d in runs for a in ALPHAS for n in ROUNDS])
 
 
-def curve(ax, d, who, color, label):
-    ax.errorbar(d.n, d[who], d[f"{who}_ci"], fmt="o-", ms=2.5, lw=1, color=color, label=label)
+def theory(strategy, daa, alpha, who, n):
+    if strategy == "SM":  # all attacker blocks and nothing else is canonical
+        return ratio(n, 1, alpha, alpha, alpha)
+    share, hashrate = rho(alpha, W), alpha
+    if who == "honest":
+        share, hashrate = 1 - share, 1 - alpha
+    return ratio(n, share, hashrate, *q(alpha, W, daa))
+
+
+def curve(ax, df, strategy, daa, alpha, who, color, label):
+    d = df[(df.strategy == strategy) & (df.daa == daa) & (df.alpha == alpha)]
+    n = np.linspace(1, max(ROUNDS), 200)
+    ax.plot(n, [theory(strategy, daa, alpha, who, k) for k in n], color=color, lw=0.8)
+    ax.errorbar(d.n, d[who], d[f"{who}_ci"], fmt="o", ms=2.5, color=color, label=label)
 
 
 def panels(titles):
@@ -65,14 +81,14 @@ def plot(df):
     canonical, axes = panels([rf"$\alpha={a}$" for a in ALPHAS])
     for ax, alpha in zip(axes, ALPHAS):
         for color, strategy in zip(COLORS, ("OCW", "SM")):
-            curve(ax, df[(df.daa == "canonical") & (df.alpha == alpha) & (df.strategy == strategy)], "attacker", color, strategy)
+            curve(ax, df, strategy, "canonical", alpha, "attacker", color, strategy)
     axes[0].legend()
     canonical.tight_layout()
 
     public, axes = panels(("Attacker (OCW)", "Honest miners"))
     for ax, who in zip(axes, ("attacker", "honest")):
         for color, alpha in zip(COLORS, ALPHAS):
-            curve(ax, df[(df.daa == "public") & (df.alpha == alpha)], who, color, rf"$\alpha={alpha}$")
+            curve(ax, df, "OCW", "public", alpha, who, color, rf"$\alpha={alpha}$")
     axes[0].legend()
     public.tight_layout()
     return {"rounds_canonical": canonical, "rounds_public": public}

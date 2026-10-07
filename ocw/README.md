@@ -20,14 +20,15 @@ instant, and the longest chain wins; between two equal-height tips, the one
 published first wins (`γ = 0`). A block counts only if it ends up on the
 canonical chain. Unless stated otherwise, `w = 10T`.
 
-| Script         | Paper     | What it measures                                                             |
-| -------------- | --------- | ---------------------------------------------------------------------------- |
-| `share.py`     | Fig. 3, 4 | Attacker share of canonical blocks and orphan rate, against Eq. 2 and Eq. 25 |
-| `rounds.py`    | Fig. 5, 6 | Canonical blocks over 10 difficulty rounds, OCW vs selfish mining (SM)       |
-| `collusion.py` | §6        | A three-pool OCW cartel whose traitor publishes every block at once          |
+| Script         | Paper     | What it measures                                                                        |
+| -------------- | --------- | --------------------------------------------------------------------------------------- |
+| `share.py`     | Fig. 3, 4 | Attacker share of canonical blocks and orphan rate, against Eq. 2 and Eq. 25            |
+| `rounds.py`    | Fig. 5, 6 | Canonical blocks over 10 difficulty rounds, OCW vs selfish mining (SM), against Eq. 3–9 |
+| `collusion.py` | §6        | A three-pool OCW cartel whose traitor publishes every block at once                     |
 
 `chain.py` is the event-driven simulator: a published block tree, the OCW
-attacker or cartel, and difficulty adjustment (DAA).
+attacker or cartel, and difficulty adjustment (DAA). `theory.py` holds the
+paper's closed forms.
 
 ## Run
 
@@ -47,7 +48,10 @@ closed forms within the confidence intervals.
 
 **Difficulty rounds (Fig. 5, 6).** A round is `2016 T` of wall-clock time.
 The block increase ratio divides a miner's canonical blocks after `n` rounds
-by what it would earn mining honestly, `hashrate · n · 2016`.
+by what it would earn mining honestly, `hashrate · n · 2016`. Lines are the
+closed forms (Eq. 3–9): the miner earns at the pre-retarget rate until the
+first retarget, then at the post-retarget rate. Dots are the simulation; they
+agree within the confidence intervals.
 
 If the DAA counts only canonical blocks, OCW starts below 1 and gains 8–10%
 after 10 rounds. Selfish mining gains more: with `α > 1/2` its private chain

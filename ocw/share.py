@@ -4,28 +4,15 @@ Each run mines until the canonical chain holds 2016 blocks, without
 difficulty adjustment, and is compared with the closed forms.
 """
 
-import math
-
 import matplotlib.pyplot as plt
 import numpy as np
 
 from harness import COLORS, main, monte_carlo
 from ocw.chain import EPOCH, Net
+from ocw.theory import eta, rho
 
 ALPHAS = np.arange(0.30, 0.81, 0.05).round(2).tolist()
 WINDOWS = (0.0, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)  # withholding window w, in units of T
-
-
-def rho(alpha, w):
-    """Attacker share of canonical blocks (Eq. 2). w = 0 is honest mining."""
-    z = math.exp(-w)
-    return alpha * z + alpha**2 * (1 - z) * (3 - 2 * alpha)
-
-
-def eta(alpha, w):
-    """Orphan rate: orphaned / published blocks (Eq. 25)."""
-    x = alpha**2 * (1 - alpha) * (1 - math.exp(-w))
-    return x / (1 + x)
 
 
 def simulate(rng, alpha, w):
