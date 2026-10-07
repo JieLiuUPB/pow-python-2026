@@ -1,9 +1,12 @@
-"""Canonical blocks gained over n difficulty rounds, OCW (w = 10T) vs selfish mining.
+"""Canonical blocks over n difficulty rounds (paper Fig. 5, 6).
 
-A round is 2016 T of wall-clock time. Difficulty adjusts every 2016 counted
-blocks, counting either the canonical chain or every published block
-(orphans included). The ratio compares a miner's canonical blocks after n
-rounds with its fair share: hashrate * n * 2016.
+A round is 2016 T of wall-clock time, so with honest mining a miner with
+hashrate a earns a * n * 2016 canonical blocks in n rounds. The block increase
+ratio divides the canonical blocks actually earned by that baseline.
+Difficulty adjusts every 2016 counted blocks:
+- canonical DAA counts the canonical chain: OCW (w = 10T) vs selfish mining;
+- public DAA counts every published block, orphans included: OCW attacker
+  and honest miners.
 """
 
 import matplotlib.pyplot as plt
@@ -15,27 +18,24 @@ ALPHAS = (0.65, 0.75)
 ROUNDS = range(1, 11)
 
 
-def majority_selfish(rng, alpha, daa, horizon):
-    """Selfish mining with alpha > 1/2: the attacker publishes its private chain
-    in 2016-block batches, so all its blocks become canonical and all honest
-    blocks are orphaned. Canonical DAA therefore counts attacker blocks only,
-    public DAA every mined block. Returns attacker blocks mined by `horizon`."""
+def selfish(rng, alpha, horizon):
+    """Eyal–Sirer selfish mining with alpha > 1/2 under the canonical DAA.
+    The private chain always stays ahead, so every attacker block and no
+    honest block becomes canonical: the DAA sees attacker blocks only.
+    Returns the attacker blocks mined by `horizon`."""
     t = start = 0.0
-    D, a, counted = 1.0, 0, 0
-    while (t := t + rng.expovariate(1 / D)) <= horizon:
-        attacker = rng.random() < alpha
-        a += attacker
-        if attacker or daa == "public":
-            counted += 1
-            if counted % EPOCH == 0:
-                D *= EPOCH / (t - start)
-                start = t
+    D, a = 1.0, 0
+    while (t := t + rng.expovariate(alpha / D)) <= horizon:
+        a += 1
+        if a % EPOCH == 0:
+            D *= EPOCH / (t - start)
+            start = t
     return a
 
 
 def simulate(rng, strategy, daa, alpha, n):
     if strategy == "SM":
-        return {"attacker": majority_selfish(rng, alpha, daa, n * EPOCH) / (alpha * n * EPOCH), "honest": 0.0}
+        return {"attacker": selfish(rng, alpha, n * EPOCH) / (alpha * n * EPOCH), "honest": 0.0}
     net = Net(rng, {"A": alpha, "H": 1 - alpha}, cartel={"A"}, daa=daa)
     while net.step(until=n * EPOCH):
         pass
@@ -44,28 +44,38 @@ def simulate(rng, strategy, daa, alpha, n):
 
 
 def run():
-    points = [dict(strategy=s, daa=d, alpha=a, n=n) for s in ("OCW", "SM") for d in ("canonical", "public")
-              for a in ALPHAS for n in ROUNDS]
-    return monte_carlo(simulate, points)
+    runs = [("OCW", "canonical"), ("SM", "canonical"), ("OCW", "public")]
+    return monte_carlo(simulate, [dict(strategy=s, daa=d, alpha=a, n=n) for s, d in runs for a in ALPHAS for n in ROUNDS])
+
+
+def curve(ax, d, who, color, label):
+    ax.errorbar(d.n, d[who], d[f"{who}_ci"], fmt="o-", ms=2.5, lw=1, color=color, label=label)
+
+
+def panels(titles):
+    fig, axes = plt.subplots(1, 2, figsize=(7, 2.6), sharey=True)
+    for ax, title in zip(axes, titles):
+        ax.axhline(1, color="0.5", lw=0.7)
+        ax.set(title=title, xlabel="Round $n$")
+    axes[0].set_ylabel("Block increase ratio")
+    return fig, axes
 
 
 def plot(df):
-    fig, axes = plt.subplots(2, 2, figsize=(7, 4.6), sharex=True, sharey=True)
-    series = (("OCW", "attacker", "OCW attacker"), ("OCW", "honest", "Honest miners vs OCW"), ("SM", "attacker", "SM attacker"))
-    for row, daa in zip(axes, ("canonical", "public")):
-        for ax, alpha in zip(row, ALPHAS):
-            for color, (strategy, who, label) in zip(COLORS, series):
-                d = df[(df.daa == daa) & (df.alpha == alpha) & (df.strategy == strategy)]
-                ax.errorbar(d.n, d[who], d[f"{who}_ci"], fmt="o-", ms=2.5, lw=1, color=color, label=label)
-            ax.axhline(1, color="0.5", lw=0.7)
-            ax.set_title(rf"{daa.capitalize()} DAA, $\alpha={alpha}$")
-    for ax in axes[1]:
-        ax.set_xlabel("Round $n$")
-    for ax in axes[:, 0]:
-        ax.set_ylabel("Canonical blocks / fair share")
-    axes[0, 0].legend()
-    fig.tight_layout()
-    return {"rounds": fig}
+    canonical, axes = panels([rf"$\alpha={a}$" for a in ALPHAS])
+    for ax, alpha in zip(axes, ALPHAS):
+        for color, strategy in zip(COLORS, ("OCW", "SM")):
+            curve(ax, df[(df.daa == "canonical") & (df.alpha == alpha) & (df.strategy == strategy)], "attacker", color, strategy)
+    axes[0].legend()
+    canonical.tight_layout()
+
+    public, axes = panels(("Attacker (OCW)", "Honest miners"))
+    for ax, who in zip(axes, ("attacker", "honest")):
+        for color, alpha in zip(COLORS, ALPHAS):
+            curve(ax, df[(df.daa == "public") & (df.alpha == alpha)], who, color, rf"$\alpha={alpha}$")
+    axes[0].legend()
+    public.tight_layout()
+    return {"rounds_canonical": canonical, "rounds_public": public}
 
 
 if __name__ == "__main__":

@@ -1,37 +1,33 @@
-# OCW: one-block conditional withholding
+# OCW: one-block-capped withholding
 
-Simulations of OCW and related withholding strategies in proof-of-work
-mining. An attacker with hashrate `α` competes with honest miners holding
-`1 − α`.
+Code for *One-Block-Capped Withholding* (`BlockWithholding_PoW.pdf`). An
+attacker with hashrate `α` competes with honest miners holding `1 − α`.
 
-**OCW.** When the attacker mines a block, it keeps that one block private
-for at most a release window `w`. Three things can happen next:
+**OCW.** When the attacker mines a block first, it keeps that one block
+private for at most a withholding window `w`. Three things can happen next:
 
 - **The window runs out.** The attacker publishes the block.
-- **The attacker mines again first.** It publishes the held block and holds
-  the new one.
+- **The attacker mines again first.** It publishes the held block, holds the
+  new one, and restarts the window.
 - **An honest block comes first.** The two blocks race. The attacker wins if
-  it mines the next block; otherwise the honest block wins.
+  it mines the next block; otherwise it abandons its block.
+
+So no orphan chain is ever longer than one block.
 
 **Model.** Time is measured in target block intervals `T`. Blocks arrive as
 a Poisson process with rate `1/D`, where `D` is the difficulty. Publishing is
 instant, and the longest chain wins; between two equal-height tips, the one
-published first wins. Honest miners never follow the attacker in a tie
-(`γ = 0`). A block counts only if it ends up on the canonical chain. Fees,
-latency, network topology, and uncle rewards are left out.
+published first wins (`γ = 0`). A block counts only if it ends up on the
+canonical chain. Unless stated otherwise, `w = 10T`.
 
-| Script          | What it measures                                                                                               |
-| --------------- | -------------------------------------------------------------------------------------------------------------- |
-| `share.py`      | Attacker share of canonical blocks and orphan rate, OCW vs Eyal–Sirer selfish mining (SM), against theory      |
-| `difficulty.py` | Difficulty after the first adjustment (2016 canonical blocks), OCW vs SM                                       |
-| `rounds.py`     | Canonical blocks over 10 difficulty rounds, counting either canonical or all published blocks                  |
-| `collusion.py`  | A three-pool OCW cartel whose traitor publishes every block at once                                            |
-| `capped.py`     | Selfish mining with at most `k = 2` private blocks                                                             |
-| `stubborn.py`   | k-deficit stubborn mining                                                                                      |
+| Script         | Paper     | What it measures                                                             |
+| -------------- | --------- | ---------------------------------------------------------------------------- |
+| `share.py`     | Fig. 3, 4 | Attacker share of canonical blocks and orphan rate, against Eq. 2 and Eq. 25 |
+| `rounds.py`    | Fig. 5, 6 | Canonical blocks over 10 difficulty rounds, OCW vs selfish mining (SM)       |
+| `collusion.py` | §6        | A three-pool OCW cartel whose traitor publishes every block at once          |
 
 `chain.py` is the event-driven simulator: a published block tree, the OCW
-cartel, and difficulty adjustment (DAA). It also holds a counting version of
-Eyal–Sirer selfish mining. `theory.py` holds the closed forms.
+attacker or cartel, and difficulty adjustment (DAA).
 
 ## Run
 
@@ -42,34 +38,33 @@ confidence intervals.
 
 ## Results
 
-**Share and orphan rate.** OCW pays only above `α = 1/2`, and the gain grows
-with the window `w`. The simulation matches the closed forms in `theory.py`.
+**Share and orphan rate (Fig. 3, 4).** OCW raises the attacker's share only
+above `α = 1/2`, and the gain grows with `w`. The simulation matches the
+closed forms within the confidence intervals.
 
 ![](results/share_alpha.png)
 ![](results/share_window.png)
 
-**Difficulty.** After one epoch, OCW lowers the difficulty to about 0.8–0.95.
-Selfish mining with `α > 1/2` lowers it to about `1 − α`, because few of its
-blocks become final.
+**Difficulty rounds (Fig. 5, 6).** A round is `2016 T` of wall-clock time.
+The block increase ratio divides a miner's canonical blocks after `n` rounds
+by what it would earn mining honestly, `hashrate · n · 2016`.
 
-![](results/difficulty.png)
+If the DAA counts only canonical blocks, OCW starts below 1 and gains 8–10%
+after 10 rounds. Selfish mining gains more: with `α > 1/2` its private chain
+always stays ahead, so all its blocks become canonical and the DAA sees
+attacker blocks only.
 
-**DAA rounds.** Each ratio divides a miner's canonical blocks after `n`
-rounds by its fair share, `hashrate · n · 2016`. If the DAA counts only
-canonical blocks, OCW gains about 8–10% over its fair share after 10 rounds.
-If it counts every published block, orphans included, OCW stays below its
-fair share. Selfish mining with `α > 1/2` is modelled the way the original
-study did: the attacker publishes in 2016-block batches, so all of its blocks
-become canonical and all honest blocks are orphaned.
+![](results/rounds_canonical.png)
 
-![](results/rounds.png)
+If the DAA counts every published block, orphans included, OCW stays below 1,
+and honest miners lose far more.
 
-**Collusion.** When the loyal pool always tolerates the traitor, the traitor
-ends up with more than its hashrate (0.336) and the loyal pool with less
-(0.289).
+![](results/rounds_public.png)
+
+**Collusion (§6).** The paper leaves open whether several pools can form a
+stable OCW cartel. Here a loyal pool (0.3) and a traitor pool (0.3) run OCW
+against honest miners (0.4); the traitor publishes its own blocks at once. If
+the loyal pool always tolerates this, the traitor ends up with more than its
+hashrate (0.336) and the loyal pool with less (0.289).
 
 ![](results/collusion.png)
-
-**Capped and stubborn variants.**
-
-![](results/capped.png) ![](results/stubborn.png)

@@ -1,4 +1,4 @@
-"""Event-driven PoW network with an OCW cartel, plus Eyal–Sirer selfish mining.
+"""Event-driven PoW network with an OCW attacker or cartel.
 
 Time is measured in target block intervals T. Blocks arrive as a Poisson
 process of rate 1/D (D = difficulty) and each block's miner is drawn by
@@ -6,8 +6,8 @@ hashrate. Publishing is instant and everyone sees the same block tree. The
 highest block is the tip; a rival of equal height never replaces it, because
 it was published later.
 
-OCW (one-block conditional withholding): when a cartel member mines a block,
-the cartel keeps it private for at most w, then publishes it.
+OCW (one-block-capped withholding): when a cartel member mines a block, the
+cartel keeps it private for at most the withholding window w, then publishes it.
 - Another cartel block comes first: publish the held block, hold the new one.
 - An honest block comes first: race. The held block stays private; the cartel
   wins if it mines the next block, otherwise the honest block wins.
@@ -124,35 +124,3 @@ class Net:
             self.D *= EPOCH / (self.time[b] - self.epoch_start)
             self.epoch_start, self.epochs = self.time[b], self.epochs + 1
 
-
-def selfish(rng, alpha, n):
-    """Eyal–Sirer selfish mining until n blocks are final, then settle the open
-    fork. Returns (attacker blocks, honest blocks, orphans, time in T at
-    which n blocks were final). D = 1 throughout."""
-    a = h = orphans = lead = 0
-    race = False
-    t = 0.0
-    while a + h < n:
-        t += rng.expovariate(1)
-        if rng.random() < alpha:
-            if race:  # attacker wins the race
-                a, orphans, race = a + 2, orphans + 1, False
-            else:
-                lead += 1
-        elif race:  # honest wins the race
-            h, orphans, race = h + 2, orphans + 1, False
-        elif lead == 0:
-            h += 1
-        elif lead == 1:  # publish the private block: race
-            lead, race = 0, True
-        elif lead == 2:  # publish both private blocks: they win
-            a, orphans, lead = a + 2, orphans + 1, 0
-        else:  # publish one block; it is sure to win
-            a, orphans, lead = a + 1, orphans + 1, lead - 1
-    if race:
-        if rng.random() < alpha:
-            a += 2
-        else:
-            h += 2
-        orphans += 1
-    return a + lead, h, orphans, t
