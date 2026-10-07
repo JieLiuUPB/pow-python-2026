@@ -111,16 +111,16 @@ class Net:
         """D_new = D_old * EPOCH / (time the last EPOCH counted blocks took)."""
         while True:
             n = (self.epochs + 1) * EPOCH
-            if self.daa == "canonical":
+            if self.daa == "public":  # block ids follow publication order
+                if len(self.time) <= n:
+                    return
+                b = n
+            else:
                 if self.height[self.tip] < n:
                     return
                 b = self.tip
                 while self.height[b] > n:
                     b = self.parent[b]
-            elif len(self.time) <= n:
-                return
-            else:  # block ids follow publication order
-                b = n
             self.D *= EPOCH / (self.time[b] - self.epoch_start)
             self.epoch_start, self.epochs = self.time[b], self.epochs + 1
 
