@@ -20,8 +20,7 @@ def simulate(rng, strategy, alpha, w=None):
         a, h, orphans, _ = selfish(rng, alpha, EPOCH)
         return {"share": a / (a + h), "orphans": orphans / (a + h + orphans)}
     net = Net(rng, {"A": alpha, "H": 1 - alpha}, cartel={"A"}, w=w)
-    while net.height[net.tip] < EPOCH:
-        net.step()
+    net.grow(EPOCH)
     chain = net.chain()
     published = len(net.miner) - 1
     return {"share": sum(net.miner[b] == "A" for b in chain) / len(chain), "orphans": 1 - len(chain) / published}

@@ -56,7 +56,7 @@ def transitions(s, alpha_l, alpha_t, ks, ell):
 
 def psi(alpha_l, alpha_t, ks):
     """Loyal share of canonical blocks under the stationary distribution (Eqs. 40–41)."""
-    ell = ell_star(alpha_l + alpha_t, alpha_t) if alpha_t else 1
+    ell = ell_star(alpha_l + alpha_t, alpha_t) if alpha_t else 1  # no traitor: ell* unused, lambda = 1
     states, index, edges = [""], {"": 0}, []
     for s in states:  # breadth-first: the list grows while we walk it
         for p, nxt, loyal, total in transitions(s, alpha_l, alpha_t, ks, ell):

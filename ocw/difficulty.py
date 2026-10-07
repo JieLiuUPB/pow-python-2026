@@ -18,8 +18,7 @@ def simulate(rng, strategy, alpha):
     if strategy == "SM":
         return {"difficulty": EPOCH / selfish(rng, alpha, EPOCH)[3]}
     net = Net(rng, {"A": alpha, "H": 1 - alpha}, cartel={"A"})
-    while net.height[net.tip] < EPOCH:
-        net.step()
+    net.grow(EPOCH)
     return {"difficulty": EPOCH / net.time[net.chain()[EPOCH - 1]]}
 
 

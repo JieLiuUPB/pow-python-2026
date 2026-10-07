@@ -27,8 +27,7 @@ SCENARIOS = {  # name: (traitor, betrayal that dissolves the cartel)
 def simulate(rng, scenario):
     traitor, limit = SCENARIOS[scenario]
     net = Net(rng, HASHRATE, cartel={"loyal", "traitor"}, traitor=traitor, limit=limit)
-    while net.height[net.tip] < BLOCKS:
-        net.step()
+    net.grow(BLOCKS)
     miners = [net.miner[b] for b in net.chain()[:BLOCKS]]
     return {pool: miners.count(pool) / BLOCKS for pool in HASHRATE}
 

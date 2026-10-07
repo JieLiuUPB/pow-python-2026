@@ -56,6 +56,11 @@ class Net:
             b = self.parent[b]
         return blocks[::-1]
 
+    def grow(self, n):
+        """Mine until the canonical chain holds n blocks."""
+        while self.height[self.tip] < n:
+            self.step()
+
     def step(self, until=math.inf):
         """Process the next event. If it would happen after `until`, stop the
         clock at `until` instead and return False."""

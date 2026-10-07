@@ -18,7 +18,7 @@ TRIALS = 5_000
 def simulate(rng, alpha, alpha_t, ell):
     """The traitor's block is safe if it mines again before honest miners erase
     the lead (bonus block too); otherwise it survives the public race w.p. omega."""
-    total = 0
+    w, total = omega(alpha), 0
     for _ in range(TRIALS):
         lead = ell
         while lead > 0:
@@ -26,7 +26,7 @@ def simulate(rng, alpha, alpha_t, ell):
             if u < alpha_t:
                 break
             lead += 1 if u < alpha else -1
-        total += 2 if lead > 0 else rng.random() < omega(alpha)
+        total += 2 if lead > 0 else rng.random() < w
     return {"withhold": total / TRIALS}
 
 
