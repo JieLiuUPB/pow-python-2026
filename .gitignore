@@ -222,5 +222,5 @@ __marimo__/
 *.csv
 CONTINUITY.md
 # Committed experiment results
-!cartel/results/*.png
-!cartel/results/*.csv
+!*/results/*.png
+!*/results/*.csv
